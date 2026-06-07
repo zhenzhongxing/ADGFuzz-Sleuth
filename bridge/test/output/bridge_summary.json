@@ -1,0 +1,17 @@
+{
+  "total": 2,
+  "processed": 2,
+  "harnesses": [
+    "test/output/harnesses\\harness_bug1.c",
+    "test/output/harnesses\\harness_bug2.c"
+  ],
+  "seeds": [
+    "test/output/seeds\\seed_bug1.bin",
+    "test/output/seeds\\seed_bug2.bin"
+  ],
+  "vulntable_entries": [
+    "/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1\t/home/user/work/ADGFuzz-Sleuth\tharness_bug1\t@@",
+    "/src/project/adgfuzz_bugs/ADGFUZZ-BUG-2\t/home/user/work/ADGFuzz-Sleuth\tharness_bug2\t@@"
+  ],
+  "errors": []
+}

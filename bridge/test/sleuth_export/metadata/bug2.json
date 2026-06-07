@@ -1,0 +1,40 @@
+{
+  "bug_id": 2,
+  "bug_type": "StatusError",
+  "timestamp": 200.3,
+  "init_path": "('AC_WPNav_update', 'wp_nav_speed', ['target_speed_cms', 'max_speed_cms', 'accel_cms'])",
+  "rv_path": [
+    [
+      "paramset",
+      "WPNAV_SPEED",
+      "2"
+    ],
+    [
+      "paramset",
+      "WPNAV_ACCEL",
+      "2"
+    ],
+    [
+      "paramset",
+      "MOT_SPOOL_TIME",
+      "1"
+    ]
+  ],
+  "inputs": [
+    {
+      "type": "paramset",
+      "name": "WPNAV_SPEED",
+      "value": "500"
+    },
+    {
+      "type": "paramset",
+      "name": "WPNAV_ACCEL",
+      "value": "100"
+    },
+    {
+      "type": "paramset",
+      "name": "MOT_SPOOL_TIME",
+      "value": "0.5"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+init_path: ('AP_AHRS_update', 'ahrs_roll_est', ['gyro_roll_input', 'accel_roll_correction', 'ekf_roll_estimate'])
+RVpath: [['paramset', 'AHRS_TRIM_X', 2], ['paramset', 'EK2_ENABLE', 3], ['paramset', 'AHRS_EKF_TYPE', 1], ['mavcmd', 'MAV_CMD_DO_SET_PARAMETER', 0]]
+paramset AHRS_TRIM_X 0.017453
+paramset EK2_ENABLE 0
+paramset AHRS_EKF_TYPE 2
+mavcmd MAV_CMD_DO_SET_PARAMETER [1, 0.5, 0, 0, 0, 0, 0]

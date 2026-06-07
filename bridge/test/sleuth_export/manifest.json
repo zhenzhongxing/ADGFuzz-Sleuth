@@ -1,0 +1,18 @@
+[
+  {
+    "bug_id": 1,
+    "bug_type": "ArithmException",
+    "seed": "test/sleuth_export/seeds\\bug1_ArithmException.bin",
+    "metadata": "test/sleuth_export/metadata\\bug1.json",
+    "param_count": 3,
+    "cmd_count": 1
+  },
+  {
+    "bug_id": 2,
+    "bug_type": "StatusError",
+    "seed": "test/sleuth_export/seeds\\bug2_StatusError.bin",
+    "metadata": "test/sleuth_export/metadata\\bug2.json",
+    "param_count": 3,
+    "cmd_count": 0
+  }
+]

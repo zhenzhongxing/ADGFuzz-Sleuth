@@ -1,0 +1,2 @@
+/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1	/home/user/work/ADGFuzz-Sleuth	harness_bug1	@@
+/src/project/adgfuzz_bugs/ADGFUZZ-BUG-2	/home/user/work/ADGFuzz-Sleuth	harness_bug2	@@

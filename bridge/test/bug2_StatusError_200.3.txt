@@ -1,0 +1,5 @@
+init_path: ('AC_WPNav_update', 'wp_nav_speed', ['target_speed_cms', 'max_speed_cms', 'accel_cms'])
+RVpath: [['paramset', 'WPNAV_SPEED', 2], ['paramset', 'WPNAV_ACCEL', 2], ['paramset', 'MOT_SPOOL_TIME', 1]]
+paramset WPNAV_SPEED 500
+paramset WPNAV_ACCEL 100
+paramset MOT_SPOOL_TIME 0.5
