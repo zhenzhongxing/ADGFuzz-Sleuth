@@ -1,0 +1,38 @@
+{
+  "bug_id": 1,
+  "bug_type": "ArithmException",
+  "timestamp": 100.5,
+  "init_path": "('AP_AHRS_update', 'ahrs_roll_est')",
+  "rv_path": [
+    [
+      "paramset",
+      "AHRS_TRIM_X"
+    ],
+    [
+      "paramset",
+      "EK2_ENABLE"
+    ]
+  ],
+  "inputs": [
+    {
+      "type": "paramset",
+      "name": "AHRS_TRIM_X",
+      "value": "0.017453"
+    },
+    {
+      "type": "paramset",
+      "name": "EK2_ENABLE",
+      "value": "0"
+    },
+    {
+      "type": "paramset",
+      "name": "AHRS_EKF_TYPE",
+      "value": "2"
+    },
+    {
+      "type": "mavcmd",
+      "name": "MAV_CMD_DO_SET_PARAMETER",
+      "value": "[1, 0.5, 0, 0, 0, 0, 0]"
+    }
+  ]
+}

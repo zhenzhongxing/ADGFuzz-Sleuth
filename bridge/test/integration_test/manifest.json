@@ -1,0 +1,10 @@
+[
+  {
+    "bug_id": 1,
+    "bug_type": "ArithmException",
+    "seed": "../bridge/test/integration_test/seeds\\bug1_ArithmException.bin",
+    "metadata": "../bridge/test/integration_test/metadata\\bug1.json",
+    "param_count": 3,
+    "cmd_count": 1
+  }
+]
