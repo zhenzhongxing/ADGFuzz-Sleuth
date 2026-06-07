@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# IDE
+.vs/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Output files
+outfile/
+
+# Large data
+*.bin
+*.stg
+*.tlog
+*.tlog.raw
+
+# Virtual environment
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+*.o
+*.bc
+*.ll
