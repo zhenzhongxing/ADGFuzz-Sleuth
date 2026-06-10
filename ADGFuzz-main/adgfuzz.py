@@ -40,11 +40,20 @@ def ardupilot_init(arg):
         raise Exception("ARDUPILOT_HOME environment variable is not set!")
     ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
-    c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
-    #c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
+    # Use gnome-terminal if DISPLAY is set (GUI available), otherwise run headless
+    sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
+    sim_args = ['python3', sim_script, '-v', type,
+                '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551',
+                '--no-mavproxy']
 
-    sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
-    print(f"Simulator started with gnome-terminal (PID: {sim.pid})")
+    if os.environ.get('DISPLAY'):
+        c = 'gnome-terminal -- ' + ' '.join(sim_args)
+        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+    else:
+        # Headless mode (Docker / no GUI) — run directly in background
+        sim = Popen(sim_args, stdin=PIPE, stderr=PIPE, stdout=PIPE,
+                    preexec_fn=os.setpgrp)
+    print(f"Simulator started (PID: {sim.pid})")
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
     # if bug_occured:
