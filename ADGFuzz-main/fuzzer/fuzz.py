@@ -485,7 +485,6 @@ class ADGfuzzer:
 
     def close_and_relunch(self):
         logging.info("================ Restarting SITL ================")
-        #self.bug_oracle.reset_all()
         self.running.clear()
         if self.oracle_thread and self.oracle_thread.is_alive():
             self.oracle_thread.join()
@@ -493,16 +492,19 @@ class ADGfuzzer:
             self.rvstatus_thread.join()
         if self.msgprocess_thread and self.msgprocess_thread.is_alive():
             self.msgprocess_thread.join()
-        try:
 
-            os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-            # os.system("fuser -k 5760/tcp")
-            # os.system("lsof -t -i :5760 | xargs -r kill -9")
-            logging.info("Terminated the sim_vehicle.py processes")
-        except Exception as e:
-            print(f"Failed to terminate sim_vehicle.py processes: {e}")
+        # Force kill all related processes and wait for port release
+        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+        time.sleep(2)
+        # Wait until port 5760 is free
+        for _ in range(30):
+            if os.system('ss -tln | grep -q 5760') != 0:
+                break
+            time.sleep(1)
+        logging.info("Old SITL terminated, port 5760 released")
         self.bug_oracle.reset_all()
-        time.sleep(1) #maybe 0
         type = self.rvtype  # default
         if type == 'copter':
             type = 'ArduCopter'
@@ -825,14 +827,15 @@ class ADGfuzzer:
 
         def reboot_nothread():
             logging.info("================ Restarting SITL ================")
-            try:
-                # os.system("pkill -f 'sim_vehicle.py'")
-                os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-                logging.info("Terminated the sim_vehicle.py processes")
-            except Exception as e:
-                print(f"Failed to terminate sim_vehicle.py processes: {e}")
-
-            time.sleep(1)  # maybe 0
+            os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+            os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+            os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+            time.sleep(2)
+            for _ in range(30):
+                if os.system('ss -tln | grep -q 5760') != 0:
+                    break
+                time.sleep(1)
+            logging.info("Old SITL terminated, port 5760 released")
             type = self.rvtype  # default
             if type == 'copter':
                 type = 'ArduCopter'

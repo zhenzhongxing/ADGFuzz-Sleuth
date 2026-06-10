@@ -81,9 +81,10 @@ def ardupilot_init(arg):
 
 def terminate_ardupilot():
     try:
-        os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-        os.system("pkill -f 'mavproxy.py'")
-        print("Terminated sim_vehicle.py and mavproxy.py processes")
+        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+        print("Terminated SITL processes")
     except Exception as e:
         print(f"Failed to terminate processes: {e}")
     logging.info('============ Fuzzing End ============')
