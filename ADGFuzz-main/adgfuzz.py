@@ -38,6 +38,16 @@ def ardupilot_init(arg):
         raise Exception("ARDUPILOT_HOME environment variable is not set!")
     ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
+    # Clean up any leftover processes from previous runs
+    os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+    os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+    os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+    time.sleep(2)
+    for _ in range(30):
+        if os.system('ss -tln | grep -q 5760') != 0 and os.system('ss -uln | grep -q 14550') != 0:
+            break
+        time.sleep(1)
+
     # Build env with ~/.local/bin in PATH (where pip3 --user installs mavproxy)
     env = os.environ.copy()
     local_bin = os.path.expanduser('~/.local/bin')
