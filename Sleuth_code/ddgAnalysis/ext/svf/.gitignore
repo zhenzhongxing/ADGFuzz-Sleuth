@@ -11,6 +11,9 @@ tests/result/
 doxygen/
 .*
 !.gitignore
+!.config.in
+!.editorconfig
+!.codecov.yml
 *~
 *.o
 *.out
