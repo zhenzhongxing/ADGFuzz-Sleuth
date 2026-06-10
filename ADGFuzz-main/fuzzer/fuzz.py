@@ -232,7 +232,13 @@ class ADGfuzzer:
             elif entropy > 50:
                 run_time = int(entropy)
 
-            print(i_path.__str__(), path.__str__(), entropy)
+            # Cap run_time by remaining time budget to avoid overshooting
+            elapsed = time.time() - begin
+            remaining = max(1, int(self.time_budget - elapsed))
+            if run_time > remaining:
+                run_time = min(remaining, 50)
+
+            print(f'[{elapsed:.0f}s/{self.time_budget}s] {i_path.__str__()} {path.__str__()} entropy={entropy} run_time={run_time}')
             # (done) 11.10: when test each MIS, rv should reboot
 
             rvmethod.loadmission(self.master)
@@ -280,9 +286,12 @@ class ADGfuzzer:
             self.oracle_thread = threading.Thread(target=self.run_oracle)
             self.oracle_thread.start()
             # add a loop. add a time threshold t, each path execution time t : while not timeout
-            for i in range(run_time):  # (done) It should be replaced by an energy scheduling algorithm
+            for i in range(run_time):
+                # Check timeout BEFORE each iteration
+                if time.time() - begin >= self.time_budget:
+                    print(f'[Timeout] Budget {self.time_budget}s exhausted, breaking inner loop')
+                    break
                 print(f'----------------- path run round-{i} -----------------')
-                # print(f'Now execute path is: {self.temp_value}') #for debug
 
                 # self.random_parse_path(path)
                 # self.execute_path1(path)  # main process , determine: send cmd/param/env/other.
