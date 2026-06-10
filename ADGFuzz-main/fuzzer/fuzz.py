@@ -529,9 +529,8 @@ class ADGfuzzer:
             sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
         else:
             sitl_log = open('/tmp/sitl_stderr.log', 'a')
-            with open(os.devnull, 'r') as devnull:
-                sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                            preexec_fn=os.setpgrp, env=env)
+            sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
+                        preexec_fn=os.setpgrp, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -847,9 +846,8 @@ class ADGfuzzer:
                 sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
             else:
                 sitl_log = open('/tmp/sitl_stderr.log', 'a')
-                with open(os.devnull, 'r') as devnull:
-                    sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                                preexec_fn=os.setpgrp, env=env)
+                sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
+                            preexec_fn=os.setpgrp, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()

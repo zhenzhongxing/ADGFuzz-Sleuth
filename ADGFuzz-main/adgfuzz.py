@@ -56,13 +56,12 @@ def ardupilot_init(arg):
         print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
         sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
     else:
-        # Headless mode (Docker / no GUI) — run sim_vehicle with MAVProxy directly,
-        # redirecting stdin from /dev/null so MAVProxy console doesn't block
+        # Headless mode (Docker / no GUI) — run sim_vehicle with MAVProxy directly.
+        # DO NOT redirect stdin (MAVProxy needs a real stdin to stay alive).
         print(f"[DEBUG init] Headless launch: {' '.join(sim_args)}", flush=True)
         sitl_log = open('/tmp/sitl_stderr.log', 'w')
-        with open(os.devnull, 'r') as devnull:
-            sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                        preexec_fn=os.setpgrp, env=env)
+        sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
+                    preexec_fn=os.setpgrp, env=env)
     print(f"[DEBUG init] Simulator started (PID: {sim.pid}), return code so far: {sim.poll()}", flush=True)
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
