@@ -72,10 +72,9 @@ def ardupilot_init(arg):
                 print(f"[DEBUG init] SITL ready after {i+1}s, starting MAVProxy...", flush=True)
                 break
         # Start MAVProxy to bridge TCP 5760 -> UDP 14550/14551
-        mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+        mavproxy_cmd = 'setsid mavproxy.py --master=tcp:127.0.0.1:5760 --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
         mavproxy_log = open('/tmp/mavproxy_stderr.log', 'w')
-        mp = Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
+        mp = Popen(mavproxy_cmd, shell=True, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
         print(f"[DEBUG init] MAVProxy PID: {mp.pid}", flush=True)
     print(f"[DEBUG init] Init complete.", flush=True)
 

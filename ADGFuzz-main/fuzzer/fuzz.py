@@ -539,10 +539,9 @@ class ADGfuzzer:
                 if os.system('ss -tln | grep -q 5760') == 0:
                     break
             # Start MAVProxy separately
-            mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                             '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+            mavproxy_cmd = 'setsid mavproxy.py --master=tcp:127.0.0.1:5760 --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
             mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
-            Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
+            Popen(mavproxy_cmd, shell=True, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -865,10 +864,9 @@ class ADGfuzzer:
                     time.sleep(1)
                     if os.system('ss -tln | grep -q 5760') == 0:
                         break
-                mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+                mavproxy_cmd = 'setsid mavproxy.py --master=tcp:127.0.0.1:5760 --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
                 mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
-                Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
+                Popen(mavproxy_cmd, shell=True, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()
