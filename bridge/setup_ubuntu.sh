@@ -72,7 +72,9 @@ export SLEUTH_PATH
 # Build z3
 if [ ! -d "$SLEUTH_PATH/ddgAnalysis/z3/build" ]; then
     cd "$SLEUTH_PATH/ddgAnalysis"
-    git clone https://github.com/z3prover/z3
+    if [ ! -d "z3" ]; then
+        git clone https://github.com/z3prover/z3
+    fi
     git -C z3 checkout z3-4.8.8
     mkdir -p z3/build
     cd z3/build
