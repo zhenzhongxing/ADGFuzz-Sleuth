@@ -517,16 +517,16 @@ class ADGfuzzer:
 
         ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
         sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-        sim_args = ['python3', sim_script, '-v', type,
+        sim_args = ['python3', sim_script, '-v', type, '--no-map',
                     '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
         if os.environ.get('DISPLAY'):
             c = 'gnome-terminal -- ' + ' '.join(sim_args)
             sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
         else:
-            sim = Popen(['screen', '-dmS', 'sitl'] + sim_args,
-                        stdin=PIPE, stderr=PIPE, stdout=PIPE,
-                        preexec_fn=os.setpgrp)
+            with open(os.devnull, 'r') as devnull:
+                sim = Popen(sim_args, stdin=devnull, stderr=PIPE, stdout=PIPE,
+                            preexec_fn=os.setpgrp)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -830,16 +830,16 @@ class ADGfuzzer:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
             ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
             sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-            sim_args = ['python3', sim_script, '-v', type,
+            sim_args = ['python3', sim_script, '-v', type, '--no-map',
                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
             if os.environ.get('DISPLAY'):
                 c = 'gnome-terminal -- ' + ' '.join(sim_args)
                 sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
             else:
-                sim = Popen(['screen', '-dmS', 'sitl'] + sim_args,
-                            stdin=PIPE, stderr=PIPE, stdout=PIPE,
-                            preexec_fn=os.setpgrp)
+                with open(os.devnull, 'r') as devnull:
+                    sim = Popen(sim_args, stdin=devnull, stderr=PIPE, stdout=PIPE,
+                                preexec_fn=os.setpgrp)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()

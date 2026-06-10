@@ -42,7 +42,7 @@ def ardupilot_init(arg):
 
     # Use gnome-terminal if DISPLAY is set (GUI available), otherwise run headless
     sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-    sim_args = ['python3', sim_script, '-v', type,
+    sim_args = ['python3', sim_script, '-v', type, '--no-map',
                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
     print(f"[DEBUG init] DISPLAY={'set' if os.environ.get('DISPLAY') else 'NOT SET'}", flush=True)
@@ -51,11 +51,12 @@ def ardupilot_init(arg):
         print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
         sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
     else:
-        # Headless mode (Docker / no GUI) — use screen to keep MAVProxy running in background
-        print(f"[DEBUG init] Headless launch via screen: {' '.join(sim_args)}", flush=True)
-        sim = Popen(['screen', '-dmS', 'sitl'] + sim_args,
-                    stdin=PIPE, stderr=PIPE, stdout=PIPE,
-                    preexec_fn=os.setpgrp)
+        # Headless mode (Docker / no GUI) — run sim_vehicle with MAVProxy directly,
+        # redirecting stdin from /dev/null so MAVProxy console doesn't block
+        print(f"[DEBUG init] Headless launch: {' '.join(sim_args)}", flush=True)
+        with open(os.devnull, 'r') as devnull:
+            sim = Popen(sim_args, stdin=devnull, stderr=PIPE, stdout=PIPE,
+                        preexec_fn=os.setpgrp)
     print(f"[DEBUG init] Simulator started (PID: {sim.pid}), return code so far: {sim.poll()}", flush=True)
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
