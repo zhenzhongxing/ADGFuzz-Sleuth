@@ -45,11 +45,16 @@ def ardupilot_init(arg):
     sim_args = ['python3', sim_script, '-v', type,
                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
+    # Build env with ~/.local/bin in PATH (where pip3 --user installs mavproxy)
+    env = os.environ.copy()
+    local_bin = os.path.expanduser('~/.local/bin')
+    env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
+
     print(f"[DEBUG init] DISPLAY={'set' if os.environ.get('DISPLAY') else 'NOT SET'}", flush=True)
     if os.environ.get('DISPLAY'):
         c = 'gnome-terminal -- ' + ' '.join(sim_args)
         print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
-        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
     else:
         # Headless mode (Docker / no GUI) — run sim_vehicle with MAVProxy directly,
         # redirecting stdin from /dev/null so MAVProxy console doesn't block
@@ -57,7 +62,7 @@ def ardupilot_init(arg):
         sitl_log = open('/tmp/sitl_stderr.log', 'w')
         with open(os.devnull, 'r') as devnull:
             sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                        preexec_fn=os.setpgrp)
+                        preexec_fn=os.setpgrp, env=env)
     print(f"[DEBUG init] Simulator started (PID: {sim.pid}), return code so far: {sim.poll()}", flush=True)
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr

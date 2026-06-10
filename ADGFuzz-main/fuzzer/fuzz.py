@@ -520,14 +520,18 @@ class ADGfuzzer:
         sim_args = ['python3', sim_script, '-v', type,
                     '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
+        env = os.environ.copy()
+        local_bin = os.path.expanduser('~/.local/bin')
+        env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
+
         if os.environ.get('DISPLAY'):
             c = 'gnome-terminal -- ' + ' '.join(sim_args)
-            sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+            sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
         else:
             sitl_log = open('/tmp/sitl_stderr.log', 'a')
             with open(os.devnull, 'r') as devnull:
                 sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                            preexec_fn=os.setpgrp)
+                            preexec_fn=os.setpgrp, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -831,17 +835,21 @@ class ADGfuzzer:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
             ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
             sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-            sim_args = ['python3', sim_script, '-v', type, '--no-map',
+            sim_args = ['python3', sim_script, '-v', type,
                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+
+            env = os.environ.copy()
+            local_bin = os.path.expanduser('~/.local/bin')
+            env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
             if os.environ.get('DISPLAY'):
                 c = 'gnome-terminal -- ' + ' '.join(sim_args)
-                sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+                sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
             else:
                 sitl_log = open('/tmp/sitl_stderr.log', 'a')
                 with open(os.devnull, 'r') as devnull:
                     sim = Popen(sim_args, stdin=devnull, stderr=sitl_log, stdout=sitl_log,
-                                preexec_fn=os.setpgrp)
+                                preexec_fn=os.setpgrp, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()
