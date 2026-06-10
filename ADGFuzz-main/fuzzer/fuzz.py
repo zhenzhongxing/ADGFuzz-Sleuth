@@ -519,20 +519,29 @@ class ADGfuzzer:
 
         ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
         sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-        sim_args = ['python3', sim_script, '-v', type,
-                    '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
         env = os.environ.copy()
         local_bin = os.path.expanduser('~/.local/bin')
         env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
         if os.environ.get('DISPLAY'):
+            sim_args = ['python3', sim_script, '-v', type,
+                        '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
             c = 'gnome-terminal -- ' + ' '.join(sim_args)
             sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
         else:
+            sitl_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
+                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
             sitl_log = open('/tmp/sitl_stderr.log', 'a')
-            sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
-                        preexec_fn=os.setpgrp, env=env)
+            sim = Popen(sitl_args, stderr=sitl_log, stdout=sitl_log, env=env)
+            for _ in range(60):
+                time.sleep(1)
+                if os.system('ss -tln | grep -q 5760') == 0:
+                    break
+            mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
+                             '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+            mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
+            Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -837,20 +846,29 @@ class ADGfuzzer:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
             ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
             sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-            sim_args = ['python3', sim_script, '-v', type,
-                        '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
             env = os.environ.copy()
             local_bin = os.path.expanduser('~/.local/bin')
             env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
             if os.environ.get('DISPLAY'):
+                sim_args = ['python3', sim_script, '-v', type,
+                            '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
                 c = 'gnome-terminal -- ' + ' '.join(sim_args)
                 sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
             else:
+                sitl_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
+                             '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
                 sitl_log = open('/tmp/sitl_stderr.log', 'a')
-                sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
-                            preexec_fn=os.setpgrp, env=env)
+                sim = Popen(sitl_args, stderr=sitl_log, stdout=sitl_log, env=env)
+                for _ in range(60):
+                    time.sleep(1)
+                    if os.system('ss -tln | grep -q 5760') == 0:
+                        break
+                mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
+                                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+                mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
+                Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()
