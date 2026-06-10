@@ -34,63 +34,29 @@ def ardupilot_init(arg):
         type = 'Rover'
 
     ARDUPILOT_HOME = os.getenv("ARDUPILOT_HOME")
+    #ARDUPILOT_HOME = '~/work/ArduPilot/'
+
     if ARDUPILOT_HOME is None:
         raise Exception("ARDUPILOT_HOME environment variable is not set!")
     ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
-    # Clean up any leftover processes from previous runs
-    os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
-    os.system("pkill -9 -f 'arducopter' 2>/dev/null")
-    os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
-    time.sleep(2)
-    for _ in range(30):
-        if os.system('ss -tln | grep -q 5760') != 0 and os.system('ss -uln | grep -q 14550') != 0:
-            break
-        time.sleep(1)
+    c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
+    #c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
 
-    # Build env with ~/.local/bin in PATH (where pip3 --user installs mavproxy)
-    env = os.environ.copy()
-    local_bin = os.path.expanduser('~/.local/bin')
-    env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
-
-    sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-
-    print(f"[DEBUG init] DISPLAY={'set' if os.environ.get('DISPLAY') else 'NOT SET'}", flush=True)
-    if os.environ.get('DISPLAY'):
-        sim_args = ['python3', sim_script, '-v', type,
-                    '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-        c = 'gnome-terminal -- ' + ' '.join(sim_args)
-        print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
-        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
-    else:
-        # Headless: SITL with --no-mavproxy (no terminal needed)
-        sitl_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
-                     '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-        print(f"[DEBUG init] Starting SITL: {' '.join(sitl_args)}", flush=True)
-        sitl_log = open('/tmp/sitl_stderr.log', 'w')
-        sim = Popen(sitl_args, stderr=sitl_log, stdout=sitl_log, env=env)
-        # Wait for SITL to bind TCP 5760
-        for i in range(60):
-            time.sleep(1)
-            if os.system('ss -tln | grep -q 5760') == 0:
-                print(f"[DEBUG init] SITL ready ({i}s), starting MAVProxy without --console...", flush=True)
-                break
-        # MAVProxy: no --console so it doesn't try to read stdin
-        mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-        mavproxy_log = open('/tmp/mavproxy_stderr.log', 'w')
-        mp = Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
-        print(f"[DEBUG init] MAVProxy PID: {mp.pid}", flush=True)
-    print(f"[DEBUG init] Init complete, SITL PID: {sim.pid}", flush=True)
+    sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+    print(f"Simulator started with gnome-terminal (PID: {sim.pid})")
+    #sim = Popen(c, shell=True)
+    #stdout, stderr = sim.communicate()  # Capture stdout and stderr
+    # if bug_occured:
+    #     os.killpg(os.getpgid(sim.pid), sim.SIGTERM) #replaced by terminate_ardupilot()
 
 def terminate_ardupilot():
     try:
-        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
-        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
-        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
-        print("Terminated SITL processes")
+        #os.system("pkill -f 'sim_vehicle.py'")
+        os.system("pkill -SIGINT -f 'sim_vehicle.py'")
+        print("Terminated the sim_vehicle.py processes")
     except Exception as e:
-        print(f"Failed to terminate processes: {e}")
+        print(f"Failed to terminate sim_vehicle.py processes: {e}")
     logging.info('============ Fuzzing End ============')
 
 def px4_init(arg):
@@ -298,7 +264,6 @@ def main():
 
     print("========================================")
 
-    print("[DEBUG] Initialize the Ardupilot and start SITL", flush=True)
     logging.info("Initialize the Ardupilot and start SITL")
     logging.info("Wait for 50 seconds to ensure that the Drone(Ardupilot) initialization is complete")
 
@@ -310,23 +275,19 @@ def main():
         ardupilot_init(rvtype)
         atexit.register(terminate_ardupilot)
 
-    print("[DEBUG] SITL launched, sleeping 50s...", flush=True)
     logging.info(f"============ {rvtype}-SITL started ============")
+    # atexit.register(terminate_ardupilot)
+    # os.killpg(os.getpgid(sim.pid), signal.SIGKILL) #SIGTERM
     time.sleep(50)
-    print("[DEBUG] Sleep done, constructing fuzzer (will connect to SITL)...", flush=True)
     logging.info("Begin Fuzzing")
 
     if rvtype == 'px4':
-        print("[DEBUG] Creating PX4fuzzer...", flush=True)
         adgfuzz = PX4fuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
     else:
-        print("[DEBUG] Creating ADGfuzzer...", flush=True)
         adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
-    print("[DEBUG] Fuzzer created, entering run()...", flush=True)
     adgfuzz.run()
-    print("[DEBUG] run() finished, printing final status...", flush=True)
     adgfuzz.print_final_status()
 
 

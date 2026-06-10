@@ -94,32 +94,21 @@ class ADGfuzzer:
 
         self.bug_inputs = set()
         #RV
-        print("[DEBUG fuzzer] Connecting to MAVLink on port 14550...", flush=True)
         self.master = self.connect_init()
-        print("[DEBUG fuzzer] Port 14550 connected, heartbeat received.", flush=True)
-        print("[DEBUG fuzzer] Connecting to MAVLink on port 14551...", flush=True)
         self.oracle_master = self.Oconn_init()
-        print("[DEBUG fuzzer] Port 14551 connected, heartbeat received.", flush=True)
         self.rvtype = rvtype
         #self.total_entropy = 0
         self.total_round = 0
-        print("[DEBUG fuzzer] ADGfuzzer.__init__ complete.", flush=True)
 
     def connect_init(self):
-        print("[DEBUG fuzzer] connect_init: creating mavlink_connection to udp:127.0.0.1:14550", flush=True)
         master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
-        print("[DEBUG fuzzer] connect_init: calling wait_heartbeat()...", flush=True)
         master.wait_heartbeat()
-        print("[DEBUG fuzzer] connect_init: heartbeat received!", flush=True)
         #logging.info("received heartbeat, get Plane gps location")
         return master
 
     def Oconn_init(self):
-        print("[DEBUG fuzzer] Oconn_init: creating mavlink_connection to udp:127.0.0.1:14551", flush=True)
         master = mavutil.mavlink_connection('udp:127.0.0.1:14551') # must use different port
-        print("[DEBUG fuzzer] Oconn_init: calling wait_heartbeat()...", flush=True)
         master.wait_heartbeat()
-        print("[DEBUG fuzzer] Oconn_init: heartbeat received!", flush=True)
         #logging.info("received heartbeat, get Plane gps location")
         return master
 
@@ -205,21 +194,21 @@ class ADGfuzzer:
         cur_time = time.time() - begin
         round = 1
 
-        print(f"[DEBUG run] Entering run(). time_budget={self.time_budget}s, paths={len(self.paths)}", flush=True)
-        print(f"[DEBUG run] rvtype={self.rvtype}", flush=True)
+        # cumulative_weights = []
+        # total_entropy = 0
+        # for _, entropy, i_path in self.paths:
+        #     total_entropy += entropy
+        #     cumulative_weights.append(total_entropy)
 
         logging.info("===================== Start Fuzzing =====================")
 
         self.load_found_buginputs()
-        print("[DEBUG run] buginputs loaded, changing mode to GUIDED...", flush=True)
 
         rvmethod.change_mode(self.master, 'GUIDED')
         time.sleep(1)
-        print("[DEBUG run] Arming and taking off...", flush=True)
         rvmethod.arm_takeoff(self.master, 30)
         logging.info("Wait for 8 seconds to confirm that the UAV is in the ascending state")
         time.sleep(5)
-        print(f"[DEBUG run] Entering main while loop. cur_time={cur_time:.0f}s < budget={self.time_budget}s", flush=True)
         # while time<budget time: / while True:
         while cur_time < self.time_budget:
             logging.info(f'--------------- Test the {round}-th path --------------- ')
@@ -243,13 +232,7 @@ class ADGfuzzer:
             elif entropy > 50:
                 run_time = int(entropy)
 
-            # Cap run_time by remaining time budget to avoid overshooting
-            elapsed = time.time() - begin
-            remaining = max(1, int(self.time_budget - elapsed))
-            if run_time > remaining:
-                run_time = min(remaining, 50)
-
-            print(f'[{elapsed:.0f}s/{self.time_budget}s] {i_path.__str__()} {path.__str__()} entropy={entropy} run_time={run_time}')
+            print(i_path.__str__(), path.__str__(), entropy)
             # (done) 11.10: when test each MIS, rv should reboot
 
             rvmethod.loadmission(self.master)
@@ -297,12 +280,9 @@ class ADGfuzzer:
             self.oracle_thread = threading.Thread(target=self.run_oracle)
             self.oracle_thread.start()
             # add a loop. add a time threshold t, each path execution time t : while not timeout
-            for i in range(run_time):
-                # Check timeout BEFORE each iteration
-                if time.time() - begin >= self.time_budget:
-                    print(f'[Timeout] Budget {self.time_budget}s exhausted, breaking inner loop')
-                    break
+            for i in range(run_time):  # (done) It should be replaced by an energy scheduling algorithm
                 print(f'----------------- path run round-{i} -----------------')
+                # print(f'Now execute path is: {self.temp_value}') #for debug
 
                 # self.random_parse_path(path)
                 # self.execute_path1(path)  # main process , determine: send cmd/param/env/other.
@@ -485,6 +465,7 @@ class ADGfuzzer:
 
     def close_and_relunch(self):
         logging.info("================ Restarting SITL ================")
+        #self.bug_oracle.reset_all()
         self.running.clear()
         if self.oracle_thread and self.oracle_thread.is_alive():
             self.oracle_thread.join()
@@ -492,19 +473,16 @@ class ADGfuzzer:
             self.rvstatus_thread.join()
         if self.msgprocess_thread and self.msgprocess_thread.is_alive():
             self.msgprocess_thread.join()
+        try:
 
-        # Force kill all related processes and wait for port release
-        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
-        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
-        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
-        time.sleep(2)
-        # Wait until port 5760 is free
-        for _ in range(30):
-            if os.system('ss -tln | grep -q 5760') != 0:
-                break
-            time.sleep(1)
-        logging.info("Old SITL terminated, port 5760 released")
+            os.system("pkill -SIGINT -f 'sim_vehicle.py'")
+            # os.system("fuser -k 5760/tcp")
+            # os.system("lsof -t -i :5760 | xargs -r kill -9")
+            logging.info("Terminated the sim_vehicle.py processes")
+        except Exception as e:
+            print(f"Failed to terminate sim_vehicle.py processes: {e}")
         self.bug_oracle.reset_all()
+        time.sleep(1) #maybe 0
         type = self.rvtype  # default
         if type == 'copter':
             type = 'ArduCopter'
@@ -517,31 +495,9 @@ class ADGfuzzer:
         if ARDUPILOT_HOME is None:
             ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
 
-        ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
-        sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-
-        env = os.environ.copy()
-        local_bin = os.path.expanduser('~/.local/bin')
-        env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
-
-        if os.environ.get('DISPLAY'):
-            sim_args = ['python3', sim_script, '-v', type,
-                        '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-            c = 'gnome-terminal -- ' + ' '.join(sim_args)
-            sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
-        else:
-            sitl_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
-                         '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-            sitl_log = open('/tmp/sitl_stderr.log', 'a')
-            sim = Popen(sitl_args, stderr=sitl_log, stdout=sitl_log, env=env)
-            for _ in range(60):
-                time.sleep(1)
-                if os.system('ss -tln | grep -q 5760') == 0:
-                    break
-            mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                             '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-            mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
-            Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
+        c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
+        #c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
+        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -826,15 +782,14 @@ class ADGfuzzer:
 
         def reboot_nothread():
             logging.info("================ Restarting SITL ================")
-            os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
-            os.system("pkill -9 -f 'arducopter' 2>/dev/null")
-            os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
-            time.sleep(2)
-            for _ in range(30):
-                if os.system('ss -tln | grep -q 5760') != 0:
-                    break
-                time.sleep(1)
-            logging.info("Old SITL terminated, port 5760 released")
+            try:
+                # os.system("pkill -f 'sim_vehicle.py'")
+                os.system("pkill -SIGINT -f 'sim_vehicle.py'")
+                logging.info("Terminated the sim_vehicle.py processes")
+            except Exception as e:
+                print(f"Failed to terminate sim_vehicle.py processes: {e}")
+
+            time.sleep(1)  # maybe 0
             type = self.rvtype  # default
             if type == 'copter':
                 type = 'ArduCopter'
@@ -844,31 +799,9 @@ class ADGfuzzer:
             ARDUPILOT_HOME = os.getenv("ARDUPILOT_HOME")
             if ARDUPILOT_HOME is None:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
-            ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
-            sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
 
-            env = os.environ.copy()
-            local_bin = os.path.expanduser('~/.local/bin')
-            env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
-
-            if os.environ.get('DISPLAY'):
-                sim_args = ['python3', sim_script, '-v', type,
-                            '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-                c = 'gnome-terminal -- ' + ' '.join(sim_args)
-                sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
-            else:
-                sitl_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
-                             '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-                sitl_log = open('/tmp/sitl_stderr.log', 'a')
-                sim = Popen(sitl_args, stderr=sitl_log, stdout=sitl_log, env=env)
-                for _ in range(60):
-                    time.sleep(1)
-                    if os.system('ss -tln | grep -q 5760') == 0:
-                        break
-                mavproxy_args = ['mavproxy.py', '--master=tcp:127.0.0.1:5760',
-                                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
-                mavproxy_log = open('/tmp/mavproxy_stderr.log', 'a')
-                Popen(mavproxy_args, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
+            c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
+            sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()
