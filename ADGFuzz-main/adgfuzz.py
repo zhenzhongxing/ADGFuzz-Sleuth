@@ -46,14 +46,17 @@ def ardupilot_init(arg):
                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551',
                 '--no-mavproxy']
 
+    print(f"[DEBUG init] DISPLAY={'set' if os.environ.get('DISPLAY') else 'NOT SET'}", flush=True)
     if os.environ.get('DISPLAY'):
         c = 'gnome-terminal -- ' + ' '.join(sim_args)
+        print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
         sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
     else:
         # Headless mode (Docker / no GUI) — run directly in background
+        print(f"[DEBUG init] Headless launch: {' '.join(sim_args)}", flush=True)
         sim = Popen(sim_args, stdin=PIPE, stderr=PIPE, stdout=PIPE,
                     preexec_fn=os.setpgrp)
-    print(f"Simulator started (PID: {sim.pid})")
+    print(f"[DEBUG init] Simulator started (PID: {sim.pid}), return code so far: {sim.poll()}", flush=True)
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
     # if bug_occured:
@@ -273,6 +276,7 @@ def main():
 
     print("========================================")
 
+    print("[DEBUG] Initialize the Ardupilot and start SITL", flush=True)
     logging.info("Initialize the Ardupilot and start SITL")
     logging.info("Wait for 50 seconds to ensure that the Drone(Ardupilot) initialization is complete")
 
@@ -284,19 +288,23 @@ def main():
         ardupilot_init(rvtype)
         atexit.register(terminate_ardupilot)
 
+    print("[DEBUG] SITL launched, sleeping 50s...", flush=True)
     logging.info(f"============ {rvtype}-SITL started ============")
-    # atexit.register(terminate_ardupilot)
-    # os.killpg(os.getpgid(sim.pid), signal.SIGKILL) #SIGTERM
     time.sleep(50)
+    print("[DEBUG] Sleep done, constructing fuzzer (will connect to SITL)...", flush=True)
     logging.info("Begin Fuzzing")
 
     if rvtype == 'px4':
+        print("[DEBUG] Creating PX4fuzzer...", flush=True)
         adgfuzz = PX4fuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
     else:
+        print("[DEBUG] Creating ADGfuzzer...", flush=True)
         adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
+    print("[DEBUG] Fuzzer created, entering run()...", flush=True)
     adgfuzz.run()
+    print("[DEBUG] run() finished, printing final status...", flush=True)
     adgfuzz.print_final_status()
 
 

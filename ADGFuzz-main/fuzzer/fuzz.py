@@ -94,21 +94,32 @@ class ADGfuzzer:
 
         self.bug_inputs = set()
         #RV
+        print("[DEBUG fuzzer] Connecting to MAVLink on port 14550...", flush=True)
         self.master = self.connect_init()
+        print("[DEBUG fuzzer] Port 14550 connected, heartbeat received.", flush=True)
+        print("[DEBUG fuzzer] Connecting to MAVLink on port 14551...", flush=True)
         self.oracle_master = self.Oconn_init()
+        print("[DEBUG fuzzer] Port 14551 connected, heartbeat received.", flush=True)
         self.rvtype = rvtype
         #self.total_entropy = 0
         self.total_round = 0
+        print("[DEBUG fuzzer] ADGfuzzer.__init__ complete.", flush=True)
 
     def connect_init(self):
+        print("[DEBUG fuzzer] connect_init: creating mavlink_connection to udp:127.0.0.1:14550", flush=True)
         master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
+        print("[DEBUG fuzzer] connect_init: calling wait_heartbeat()...", flush=True)
         master.wait_heartbeat()
+        print("[DEBUG fuzzer] connect_init: heartbeat received!", flush=True)
         #logging.info("received heartbeat, get Plane gps location")
         return master
 
     def Oconn_init(self):
+        print("[DEBUG fuzzer] Oconn_init: creating mavlink_connection to udp:127.0.0.1:14551", flush=True)
         master = mavutil.mavlink_connection('udp:127.0.0.1:14551') # must use different port
+        print("[DEBUG fuzzer] Oconn_init: calling wait_heartbeat()...", flush=True)
         master.wait_heartbeat()
+        print("[DEBUG fuzzer] Oconn_init: heartbeat received!", flush=True)
         #logging.info("received heartbeat, get Plane gps location")
         return master
 
@@ -194,21 +205,21 @@ class ADGfuzzer:
         cur_time = time.time() - begin
         round = 1
 
-        # cumulative_weights = []
-        # total_entropy = 0
-        # for _, entropy, i_path in self.paths:
-        #     total_entropy += entropy
-        #     cumulative_weights.append(total_entropy)
+        print(f"[DEBUG run] Entering run(). time_budget={self.time_budget}s, paths={len(self.paths)}", flush=True)
+        print(f"[DEBUG run] rvtype={self.rvtype}", flush=True)
 
         logging.info("===================== Start Fuzzing =====================")
 
         self.load_found_buginputs()
+        print("[DEBUG run] buginputs loaded, changing mode to GUIDED...", flush=True)
 
         rvmethod.change_mode(self.master, 'GUIDED')
         time.sleep(1)
+        print("[DEBUG run] Arming and taking off...", flush=True)
         rvmethod.arm_takeoff(self.master, 30)
         logging.info("Wait for 8 seconds to confirm that the UAV is in the ascending state")
         time.sleep(5)
+        print(f"[DEBUG run] Entering main while loop. cur_time={cur_time:.0f}s < budget={self.time_budget}s", flush=True)
         # while time<budget time: / while True:
         while cur_time < self.time_budget:
             logging.info(f'--------------- Test the {round}-th path --------------- ')
