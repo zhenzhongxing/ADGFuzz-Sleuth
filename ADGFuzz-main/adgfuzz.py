@@ -44,39 +44,20 @@ def ardupilot_init(arg):
     env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
     sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-    sim_args = ['python3', sim_script, '-v', type, '--no-mavproxy',
+    sim_args = ['python3', sim_script, '-v', type,
                 '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
     print(f"[DEBUG init] DISPLAY={'set' if os.environ.get('DISPLAY') else 'NOT SET'}", flush=True)
     if os.environ.get('DISPLAY'):
-        # GUI mode
-        mavproxy_cmd = ('mavproxy.py --master=tcp:127.0.0.1:5760 '
-                        '--out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551')
         c = 'gnome-terminal -- ' + ' '.join(sim_args)
         print(f"[DEBUG init] Launching via gnome-terminal: {c}", flush=True)
         sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True, env=env)
     else:
-        # Headless: start SITL (no-mavproxy) first, then MAVProxy separately
-        print(f"[DEBUG init] Headless SITL: {' '.join(sim_args)}", flush=True)
+        print(f"[DEBUG init] Headless launch: {' '.join(sim_args)}", flush=True)
         sitl_log = open('/tmp/sitl_stderr.log', 'w')
-        # Use shell=True with setsid to detach from terminal
-        sitl_cmd = 'setsid ' + ' '.join(sim_args)
-        sim = Popen(sitl_cmd, shell=True, stderr=sitl_log, stdout=sitl_log, env=env)
-        print(f"[DEBUG init] SITL PID: {sim.pid}", flush=True)
-        # Wait for SITL to start and bind TCP 5760
-        print("[DEBUG init] Waiting for SITL to bind TCP 5760...", flush=True)
-        for i in range(60):
-            time.sleep(1)
-            ret = os.system('ss -tln | grep -q 5760')
-            if ret == 0:
-                print(f"[DEBUG init] SITL ready after {i+1}s, starting MAVProxy...", flush=True)
-                break
-        # Start MAVProxy to bridge TCP 5760 -> UDP 14550/14551
-        mavproxy_cmd = 'setsid mavproxy.py --master=tcp:127.0.0.1:5760 --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
-        mavproxy_log = open('/tmp/mavproxy_stderr.log', 'w')
-        mp = Popen(mavproxy_cmd, shell=True, stderr=mavproxy_log, stdout=mavproxy_log, env=env)
-        print(f"[DEBUG init] MAVProxy PID: {mp.pid}", flush=True)
-    print(f"[DEBUG init] Init complete.", flush=True)
+        sim = Popen(sim_args, stderr=sitl_log, stdout=sitl_log,
+                    preexec_fn=os.setpgrp, env=env)
+    print(f"[DEBUG init] Simulator started (PID: {sim.pid})", flush=True)
 
 def terminate_ardupilot():
     try:
