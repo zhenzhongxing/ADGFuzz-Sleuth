@@ -1,0 +1,2573 @@
+/*
+   american fuzzy lop++ - fuzzer code
+   --------------------------------
+
+   Originally written by Michal Zalewski
+
+   Now maintained by Marc Heuse <mh@mh-sec.de>,
+                        Heiko Eißfeldt <heiko.eissfeldt@hexco.de> and
+                        Andrea Fioraldi <andreafioraldi@gmail.com>
+
+   Copyright 2016, 2017 Google Inc. All rights reserved.
+   Copyright 2019-2020 AFLplusplus Project. All rights reserved.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at:
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   This is the real deal: the program takes an instrumented binary and
+   attempts a variety of basic fuzzing tricks, paying close attention to
+   how they affect the execution path.
+
+ */
+
+#include "afl-fuzz.h"
+#include "cmplog.h"
+#include <limits.h>
+#include <stdlib.h>
+#ifndef USEMMAP
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <fcntl.h>
+  #include <sys/ipc.h>
+  #include <sys/shm.h>
+#endif
+
+#ifdef __APPLE__
+  #include <sys/qos.h>
+#endif
+
+#ifdef PROFILING
+extern u64 time_spent_working;
+#endif
+
+static void
+at_exit() {  // 作用：在程序退出时执行一些清理工作，比如关闭共享内存、杀死子进程等
+
+  s32   i, pid1 = 0, pid2 = 0;
+  char *list[4] = {SHM_ENV_VAR, SHM_FUZZ_ENV_VAR, CMPLOG_SHM_ENV_VAR, NULL};
+  char *ptr;
+
+  ptr = getenv(CPU_AFFINITY_ENV_VAR);
+  if (ptr && *ptr) unlink(ptr);
+
+  ptr = getenv("__AFL_TARGET_PID1");
+  if (ptr && *ptr && (pid1 = atoi(ptr)) > 0) kill(pid1, SIGTERM);
+
+  ptr = getenv("__AFL_TARGET_PID2");
+  if (ptr && *ptr && (pid2 = atoi(ptr)) > 0) kill(pid2, SIGTERM);
+
+  i = 0;
+  while (list[i] != NULL) {
+
+    ptr = getenv(list[i]);
+    if (ptr && *ptr) {
+
+#ifdef USEMMAP
+
+      shm_unlink(ptr);
+
+#else
+
+      shmctl(atoi(ptr), IPC_RMID, NULL);
+
+#endif
+
+    }
+
+    i++;
+
+  }
+
+  int kill_signal = SIGKILL;
+  /* AFL_KILL_SIGNAL should already be a valid int at this point */
+  if ((ptr = getenv("AFL_KILL_SIGNAL"))) { kill_signal = atoi(ptr); }
+
+  if (pid1 > 0) { kill(pid1, kill_signal); }
+  if (pid2 > 0) { kill(pid2, kill_signal); }
+
+}
+
+/* Display usage hints. */
+
+static void usage(
+    u8 *argv0,
+    int more_help) {  // 作用：显示程序的使用说明，包括可用的命令行选项和环境变量等
+
+  SAYF(
+      "\n%s [ options ] -- /path/to/fuzzed_app [ ... ]\n\n"
+
+      "Required parameters:\n"
+      "  -i dir        - input directory with test cases\n"
+      "  -o dir        - output directory for fuzzer findings\n\n"
+
+      "Execution control settings:\n"
+      "  -p schedule   - power schedules compute a seed's performance score:\n"
+      "                  fast(default), explore, exploit, seek, rare, mmopt, "
+      "coe, lin\n"
+      "                  quad -- see docs/power_schedules.md\n"
+      "  -f file       - location read by the fuzzed program (default: stdin "
+      "or @@)\n"
+      "  -t msec       - timeout for each run (auto-scaled, default %u ms). "
+      "Add a '+'\n"
+      "                  to auto-calculate the timeout, the value being the "
+      "maximum.\n"
+      "  -m megs       - memory limit for child process (%u MB, 0 = no limit "
+      "[default])\n"
+      "  -O            - use binary-only instrumentation (FRIDA mode)\n"
+      "  -Q            - use binary-only instrumentation (QEMU mode)\n"
+      "  -U            - use unicorn-based instrumentation (Unicorn mode)\n"
+      "  -W            - use qemu-based instrumentation with Wine (Wine "
+      "mode)\n\n"
+
+      "Mutator settings:\n"
+      "  -D            - enable deterministic fuzzing (once per queue entry)\n"
+      "  -L minutes    - use MOpt(imize) mode and set the time limit for "
+      "entering the\n"
+      "                  pacemaker mode (minutes of no new paths). 0 = "
+      "immediately,\n"
+      "                  -1 = immediately and together with normal mutation.\n"
+      "                  See docs/README.MOpt.md\n"
+      "  -c program    - enable CmpLog by specifying a binary compiled for "
+      "it.\n"
+      "                  if using QEMU, just use -c 0.\n"
+      "  -l cmplog_opts - CmpLog configuration values (e.g. \"2AT\"):\n"
+      "                  1=small files, 2=larger files (default), 3=all "
+      "files,\n"
+      "                  A=arithmetic solving, T=transformational solving.\n\n"
+      "Fuzzing behavior settings:\n"
+      "  -Z            - sequential queue selection instead of weighted "
+      "random\n"
+      "  -N            - do not unlink the fuzzing input file (for devices "
+      "etc.)\n"
+      "  -n            - fuzz without instrumentation (non-instrumented mode)\n"
+      "  -x dict_file  - fuzzer dictionary (see README.md, specify up to 4 "
+      "times)\n\n"
+
+      "Test settings:\n"
+      "  -s seed       - use a fixed seed for the RNG\n"
+      "  -V seconds    - fuzz for a specified time then terminate\n"
+      "  -E execs      - fuzz for an approx. no. of total executions then "
+      "terminate\n"
+      "                  Note: not precise and can have several more "
+      "executions.\n\n"
+
+      "Other stuff:\n"
+      "  -M/-S id      - distributed mode (see docs/parallel_fuzzing.md)\n"
+      "                  -M auto-sets -D, -Z (use -d to disable -D) and no "
+      "trimming\n"
+      "  -F path       - sync to a foreign fuzzer queue directory (requires "
+      "-M, can\n"
+      "                  be specified up to %u times)\n"
+      // "  -d            - skip deterministic fuzzing in -M mode\n"
+      "  -T text       - text banner to show on the screen\n"
+      "  -I command    - execute this command/script when a new crash is "
+      "found\n"
+      //"  -B bitmap.txt - mutate a specific test case, use the out/fuzz_bitmap
+      //" "file\n"
+      "  -C            - crash exploration mode (the peruvian rabbit thing)\n"
+      "  -b cpu_id     - bind the fuzzing process to the specified CPU core "
+      "(0-...)\n"
+      "  -e ext        - file extension for the fuzz test input file (if "
+      "needed)\n\n",
+      argv0, EXEC_TIMEOUT, MEM_LIMIT, FOREIGN_SYNCS_MAX);
+
+  if (more_help > 1) {
+
+#if defined USE_COLOR && !defined ALWAYS_COLORED
+  #define DYN_COLOR \
+    "AFL_NO_COLOR or AFL_NO_COLOUR: switch colored console output off\n"
+#else
+  #define DYN_COLOR
+#endif
+
+#ifdef AFL_PERSISTENT_RECORD
+  #define PERSISTENT_MSG                                                 \
+    "AFL_PERSISTENT_RECORD: record the last X inputs to every crash in " \
+    "out/crashes\n"
+#else
+  #define PERSISTENT_MSG
+#endif
+
+    SAYF(
+      "Environment variables used:\n"
+      "LD_BIND_LAZY: do not set LD_BIND_NOW env var for target\n"
+      "ASAN_OPTIONS: custom settings for ASAN\n"
+      "              (must contain abort_on_error=1 and symbolize=0)\n"
+      "MSAN_OPTIONS: custom settings for MSAN\n"
+      "              (must contain exitcode="STRINGIFY(MSAN_ERROR)" and symbolize=0)\n"
+      "AFL_AUTORESUME: resume fuzzing if directory specified by -o already exists\n"
+      "AFL_BENCH_JUST_ONE: run the target just once\n"
+      "AFL_BENCH_UNTIL_CRASH: exit soon when the first crashing input has been found\n"
+      "AFL_CMPLOG_ONLY_NEW: do not run cmplog on initial testcases (good for resumes!)\n"
+      "AFL_CRASH_EXITCODE: optional child exit code to be interpreted as crash\n"
+      "AFL_CUSTOM_MUTATOR_LIBRARY: lib with afl_custom_fuzz() to mutate inputs\n"
+      "AFL_CUSTOM_MUTATOR_ONLY: avoid AFL++'s internal mutators\n"
+      "AFL_CYCLE_SCHEDULES: after completing a cycle, switch to a different -p schedule\n"
+      "AFL_DEBUG: extra debugging output for Python mode trimming\n"
+      "AFL_DEBUG_CHILD: do not suppress stdout/stderr from target\n"
+      "AFL_DISABLE_TRIM: disable the trimming of test cases\n"
+      "AFL_DUMB_FORKSRV: use fork server without feedback from target\n"
+      "AFL_EXIT_WHEN_DONE: exit when all inputs are run and no new finds are found\n"
+      "AFL_EXIT_ON_TIME: exit when no new paths are found within the specified time period\n"
+      "AFL_EXPAND_HAVOC_NOW: immediately enable expand havoc mode (default: after 60 minutes and a cycle without finds)\n"
+      "AFL_FAST_CAL: limit the calibration stage to three cycles for speedup\n"
+      "AFL_FORCE_UI: force showing the status screen (for virtual consoles)\n"
+      "AFL_FORKSRV_INIT_TMOUT: time spent waiting for forkserver during startup (in milliseconds)\n"
+      "AFL_HANG_TMOUT: override timeout value (in milliseconds)\n"
+      "AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: don't warn about core dump handlers\n"
+      "AFL_IGNORE_UNKNOWN_ENVS: don't warn on unknown env vars\n"
+      "AFL_IGNORE_PROBLEMS: do not abort fuzzing if an incorrect setup is detected during a run\n"
+      "AFL_IMPORT_FIRST: sync and import test cases from other fuzzer instances first\n"
+      "AFL_KILL_SIGNAL: Signal ID delivered to child processes on timeout, etc. (default: SIGKILL)\n"
+      "AFL_MAP_SIZE: the shared memory size for that target. must be >= the size\n"
+      "              the target was compiled for\n"
+      "AFL_MAX_DET_EXTRAS: if more entries are in the dictionary list than this value\n"
+      "                    then they are randomly selected instead all of them being\n"
+      "                    used. Defaults to 200.\n"
+      "AFL_NO_AFFINITY: do not check for an unused cpu core to use for fuzzing\n"
+      "AFL_TRY_AFFINITY: try to bind to an unused core, but don't fail if unsuccessful\n"
+      "AFL_NO_ARITH: skip arithmetic mutations in deterministic stage\n"
+      "AFL_NO_AUTODICT: do not load an offered auto dictionary compiled into a target\n"
+      "AFL_NO_CPU_RED: avoid red color for showing very high cpu usage\n"
+      "AFL_NO_FORKSRV: run target via execve instead of using the forkserver\n"
+      "AFL_NO_SNAPSHOT: do not use the snapshot feature (if the snapshot lkm is loaded)\n"
+      "AFL_NO_UI: switch status screen off\n"
+
+      DYN_COLOR
+
+      "AFL_PATH: path to AFL support binaries\n"
+      "AFL_PYTHON_MODULE: mutate and trim inputs with the specified Python module\n"
+      "AFL_QUIET: suppress forkserver status messages\n"
+
+      PERSISTENT_MSG
+
+      "AFL_PRELOAD: LD_PRELOAD / DYLD_INSERT_LIBRARIES settings for target\n"
+      "AFL_TARGET_ENV: pass extra environment variables to target\n"
+      "AFL_SHUFFLE_QUEUE: reorder the input queue randomly on startup\n"
+      "AFL_SKIP_BIN_CHECK: skip afl compatibility checks, also disables auto map size\n"
+      "AFL_SKIP_CPUFREQ: do not warn about variable cpu clocking\n"
+      //"AFL_SKIP_CRASHES: during initial dry run do not terminate for crashing inputs\n"
+      "AFL_STATSD: enables StatsD metrics collection\n"
+      "AFL_STATSD_HOST: change default statsd host (default 127.0.0.1)\n"
+      "AFL_STATSD_PORT: change default statsd port (default: 8125)\n"
+      "AFL_STATSD_TAGS_FLAVOR: set statsd tags format (default: disable tags)\n"
+      "                        Supported formats are: 'dogstatsd', 'librato',\n"
+      "                        'signalfx' and 'influxdb'\n"
+      "AFL_TESTCACHE_SIZE: use a cache for testcases, improves performance (in MB)\n"
+      "AFL_TMPDIR: directory to use for input file generation (ramdisk recommended)\n"
+      //"AFL_PERSISTENT: not supported anymore -> no effect, just a warning\n"
+      //"AFL_DEFER_FORKSRV: not supported anymore -> no effect, just a warning\n"
+      "\n"
+    );
+
+  } else {
+
+    SAYF(
+        "To view also the supported environment variables of afl-fuzz please "
+        "use \"-hh\".\n\n");
+
+  }
+
+#ifdef USE_PYTHON
+  SAYF("Compiled with %s module support, see docs/custom_mutator.md\n",
+       (char *)PYTHON_VERSION);
+#else
+  SAYF("Compiled without python module support.\n");
+#endif
+
+#ifdef AFL_PERSISTENT_RECORD
+  SAYF("Compiled with AFL_PERSISTENT_RECORD support.\n");
+#else
+  SAYF("Compiled without AFL_PERSISTENT_RECORD support.\n");
+#endif
+
+#ifdef USEMMAP
+  SAYF("Compiled with shm_open support.\n");
+#else
+  SAYF("Compiled with shmat support.\n");
+#endif
+
+#ifdef ASAN_BUILD
+  SAYF("Compiled with ASAN_BUILD.\n");
+#endif
+
+#ifdef NO_SPLICING
+  SAYF("Compiled with NO_SPLICING.\n");
+#endif
+
+#ifdef PROFILING
+  SAYF("Compiled with PROFILING.\n");
+#endif
+
+#ifdef INTROSPECTION
+  SAYF("Compiled with INTROSPECTION.\n");
+#endif
+
+#ifdef _DEBUG
+  SAYF("Compiled with _DEBUG.\n");
+#endif
+
+#ifdef _AFL_DOCUMENT_MUTATIONS
+  SAYF("Compiled with _AFL_DOCUMENT_MUTATIONS.\n");
+#endif
+
+  SAYF("For additional help please consult %s/README.md :)\n\n", doc_path);
+
+  exit(1);
+#undef PHYTON_SUPPORT
+
+}
+
+#ifndef AFL_LIB
+
+static int stricmp(char const *a,
+                   char const *b) {  // 作用：比较两个字符串是否相等，忽略大小写
+
+  if (!a || !b) { FATAL("Null reference"); }
+
+  for (;; ++a, ++b) {
+
+    int d;
+    d = tolower((int)*a) - tolower((int)*b);
+    if (d != 0 || !*a) { return d; }
+
+  }
+
+}
+
+static void fasan_check_afl_preload(
+    char *afl_preload) {  // 作用：检查环境变量 AFL_PRELOAD 中是否包含 Address
+                          // Sanitizer 的动态库，并且该库是否可读
+
+  char   first_preload[PATH_MAX + 1] = {0};
+  char * separator = strchr(afl_preload, ':');
+  size_t first_preload_len = PATH_MAX;
+  char * basename;
+  char   clang_runtime_prefix[] = "libclang_rt.asan";
+
+  if (separator != NULL && (separator - afl_preload) < PATH_MAX) {
+
+    first_preload_len = separator - afl_preload;
+
+  }
+
+  strncpy(first_preload, afl_preload, first_preload_len);
+
+  basename = strrchr(first_preload, '/');
+  if (basename == NULL) {
+
+    basename = first_preload;
+
+  } else {
+
+    basename = basename + 1;
+
+  }
+
+  if (strncmp(basename, clang_runtime_prefix,
+              sizeof(clang_runtime_prefix) - 1) != 0) {
+
+    FATAL("Address Sanitizer DSO must be the first DSO in AFL_PRELOAD");
+
+  }
+
+  if (access(first_preload, R_OK) != 0) {
+
+    FATAL("Address Sanitizer DSO not found");
+
+  }
+
+  OKF("Found ASAN DSO: %s", first_preload);
+
+}
+
+/* Main entry point */
+
+int main(int argc, char **argv_orig, char **envp) { 
+
+  s32 opt, auto_sync = 0 /*, user_set_cache = 0*/;
+  u64 prev_queued = 0;
+  u32 sync_interval_cnt = 0, seek_to = 0, show_help = 0,
+      map_size = get_map_size();
+  u8 *extras_dir[4];
+  u8  mem_limit_given = 0, exit_1 = 0, debug = 0,
+     extras_dir_cnt = 0 /*, have_p = 0*/;
+  char * afl_preload;
+  char * frida_afl_preload = NULL;
+  char **use_argv;
+
+  struct timeval  tv;
+  struct timezone tz;
+
+  #if defined USE_COLOR && defined ALWAYS_COLORED
+  if (getenv("AFL_NO_COLOR") ||
+      getenv(
+          "AFL_NO_COLOUR")) {  // 作用：如果环境变量 AFL_NO_COLOR 或
+                               // AFL_NO_COLOUR
+                               // 被设置了，那么就会显示一个警告信息，告诉用户设置这些环境变量没有效果，因为颜色是在编译时配置的
+
+    WARNF(
+        "Setting AFL_NO_COLOR has no effect (colors are configured on at "
+        "compile time)");
+
+  }
+
+  #endif
+
+  char **argv = argv_cpy_dup(argc, argv_orig);
+
+  afl_state_t *afl = calloc(1, sizeof(afl_state_t));
+  if (!afl) { FATAL("Could not create afl state"); }
+
+  if (get_afl_env("AFL_DEBUG")) { debug = afl->debug = 1; }
+
+  afl_state_init(afl, map_size);
+  afl->debug = debug;
+  afl_fsrv_init(&afl->fsrv);
+  if (debug) { afl->fsrv.debug = true; }
+  read_afl_environment(afl, envp);
+  if (afl->shm.map_size) { afl->fsrv.map_size = afl->shm.map_size; }
+  exit_1 = !!afl->afl_env.afl_bench_just_one;
+
+  SAYF(cCYA "afl-fuzz" VERSION cRST
+            " based on afl by Michal Zalewski and a large online community\n");
+
+  doc_path = access(DOC_PATH, F_OK) != 0 ? (u8 *)"docs" : (u8 *)DOC_PATH;
+
+  gettimeofday(&tv, &tz);
+  rand_set_seed(afl, tv.tv_sec ^ tv.tv_usec ^ getpid());
+
+  afl->shmem_testcase_mode = 1;  // we always try to perform shmem 
+  
+  afl->shm.targetfuzz_mode = 1;   // Add by wei : we always perform target fuzzing //开启目标导向模糊测试模式
+
+  while ((opt = getopt(
+              argc, argv,
+              "+b:B:c:CdDe:E:hi:I:f:F:k:l:L:m:M:nNOo:p:RQs:S:t:T:UV:Wx:Z")) >
+         0) {  // 作用：解析命令行参数，根据不同的选项设置 afl_state_t
+               // 结构体中的相应字段，以便后续的 fuzzing
+               // 过程能够按照用户指定的配置进行
+
+    switch (
+        opt) {  // 作用：根据不同的命令行选项设置 afl_state_t 结构体中的相应字段
+
+      case 'Z':  // 顺序队列选择
+        afl->old_seed_selection = 1;
+        break;
+
+      case 'I':  // 新增选项 -I：指定在发现新崩溃时执行的命令或脚本
+        afl->infoexec =
+            optarg;  // 将用户指定的命令或脚本路径保存到 afl_state_t 结构体中的
+                     // infoexec 字段中，以便在后续的 fuzzing
+                     // 过程中，当发现新的崩溃时能够执行该命令或脚本
+        break;
+
+      case 'b': { /* bind CPU core */  // 作用：将 fuzzing 进程绑定到指定的 CPU
+                                       // 核心上，以提高 fuzzing 的性能和稳定性
+
+        if (afl->cpu_to_bind != -1) FATAL("Multiple -b options not supported");
+
+        if (sscanf(optarg, "%d", &afl->cpu_to_bind) < 0) {
+
+          FATAL("Bad syntax used for -b");
+
+        }
+
+        break;
+
+      }
+
+      case 'c': {  // 启用 CmpLog 功能，并指定一个编译了 CmpLog 的二进制文件
+
+        afl->shm.cmplog_mode = 1;
+        afl->cmplog_binary = ck_strdup(
+            optarg);  // 将用户指定的 CmpLog 二进制文件路径保存到 afl_state_t
+                      // 结构体中的 cmplog_binary 字段中，以便在后续的 fuzzing
+                      // 过程中能够使用该二进制文件进行 CmpLog 功能的启用和配置
+        break;
+
+      }
+
+      case 's': {  // 使用固定的随机数种子进行 fuzzing，以便在不同的 fuzzing
+                   // 过程中能够得到相同的结果，方便调试和复现问题
+
+        if (optarg == NULL) { FATAL("No valid seed provided. Got NULL."); }
+        rand_set_seed(afl, strtoul(optarg, 0L, 10));
+        afl->fixed_seed = 1;
+        break;
+
+      }
+
+          /* Power schedule */
+
+      case 'p':  // 作用：设置 power schedule，即计算种子性能分数的方式，以便在
+                 // fuzzing 过程中能够根据用户指定的策略选择和变异种子                                        
+
+        if (!stricmp(optarg, "fast")) { 
+
+          afl->schedule = FAST; 
+
+        } else if (!stricmp(optarg, "coe")) {
+
+          afl->schedule = COE;
+
+        } else if (!stricmp(optarg, "exploit")) {
+
+          afl->schedule = EXPLOIT;
+
+        } else if (!stricmp(optarg, "lin")) {
+
+          afl->schedule = LIN;
+
+        } else if (!stricmp(optarg, "quad")) {
+
+          afl->schedule = QUAD;
+
+        } else if (!stricmp(optarg, "mopt") || !stricmp(optarg, "mmopt")) {
+
+          afl->schedule = MMOPT;
+
+        } else if (!stricmp(optarg, "rare")) {
+
+          afl->schedule = RARE;
+
+        } else if (!stricmp(optarg, "explore") || !stricmp(optarg, "afl") ||
+
+                   !stricmp(optarg, "default") ||
+
+                   !stricmp(optarg, "normal")) {
+
+          afl->schedule = EXPLORE;
+
+        } else if (!stricmp(optarg, "seek")) {
+
+          afl->schedule = SEEK;
+
+        } else {
+
+          FATAL("Unknown -p power schedule");
+
+        }
+
+        // have_p = 1;
+
+        break;
+
+      case 'e':  // 作用：设置 fuzz 测试输入文件的扩展名，以便在 fuzzing
+                 // 过程中能够根据用户指定的扩展名生成和使用测试输入文件
+
+        if (afl->file_extension) { FATAL("Multiple -e options not supported"); }
+
+        afl->file_extension = optarg;
+
+        break;
+
+     /* input dir */
+
+      case 'i':  // 作用：设置输入目录，即包含测试用例的目录，以便在 fuzzing
+                 // 过程中能够从该目录中读取测试用例进行 fuzzing                                       
+
+        if (afl->in_dir) { FATAL("Multiple -i options not supported"); }
+        if (optarg == NULL) { FATAL("Invalid -i option (got NULL)."); }
+        afl->in_dir = optarg;
+
+        if (!strcmp(afl->in_dir, "-")) { afl->in_place_resume = 1; }
+
+        break;
+
+        /* output dir */
+
+      case 'o':  //作用：设置输出目录，即保存 fuzzing 结果的目录，以便在 fuzzing
+                 //  过程中能够将发现的崩溃、路径等信息保存在该目录中，方便用户查看和分析                                             
+
+        if (afl->out_dir) { FATAL("Multiple -o options not supported"); }
+        afl->out_dir = optarg;
+        break;
+
+        /* main sync ID */
+      case 'M': {    //作用：设置主同步 ID，即分布式 fuzzing 中主节点的标识符，以便在分布式 fuzzing
+                   //  过程中能够区分主节点和次节点，并且根据用户指定的 ID
+                   //  进行同步和通信                                       
+
+        u8 *c;
+
+        if (afl->non_instrumented_mode) {
+
+          FATAL("-M is not supported in non-instrumented mode");
+
+        }
+
+        if (afl->sync_id) { FATAL("Multiple -S or -M options not supported"); }
+
+        /* sanity check for argument: should not begin with '-' (possible
+         * option) */
+        if (optarg && *optarg == '-') {
+
+          FATAL(
+              "argument for -M started with a dash '-', which is used for "
+              "options");
+
+        }
+
+        afl->sync_id = ck_strdup(optarg);
+        afl->old_seed_selection = 1;  // force old queue walking seed selection
+        afl->disable_trim = 1;        // disable trimming
+
+        if ((c = strchr(afl->sync_id, ':'))) {
+
+          *c = 0;
+
+          if (sscanf(c + 1, "%u/%u", &afl->main_node_id, &afl->main_node_max) !=
+                  2 ||
+              !afl->main_node_id || !afl->main_node_max ||
+              afl->main_node_id > afl->main_node_max ||
+              afl->main_node_max > 1000000) {
+
+            FATAL("Bogus main node ID passed to -M");
+
+          }
+
+        }
+
+        afl->is_main_node = 1;
+
+      }
+
+      break;
+
+      /* secondary sync id */
+      case 'S':        //作用：设置次同步 ID，即分布式 fuzzing 中次节点的标识符，以便在分布式 fuzzing
+                       //  过程中能够区分主节点和次节点，并且根据用户指定的 ID
+                 //   进行同步和通信                                
+
+        if (afl->non_instrumented_mode) {
+
+          FATAL("-S is not supported in non-instrumented mode");
+
+        }
+
+        if (afl->sync_id) { FATAL("Multiple -S or -M options not supported"); }
+
+        /* sanity check for argument: should not begin with '-' (possible
+         * option) */
+        if (optarg && *optarg == '-') {
+
+          FATAL(
+              "argument for -M started with a dash '-', which is used for "
+              "options");
+
+        }
+
+        afl->sync_id = ck_strdup(optarg);
+        afl->is_secondary_node = 1;
+        break;
+
+        /* foreign sync dir */
+      case 'F':          //作用：设置外部同步目录，即分布式 fuzzing 中其他节点的队列目录，以便在分布式 fuzzing
+                 //   过程中能够从其他节点的队列目录中同步和导入测试用例，促进不同节点之间的协同和效率提升                               
+
+        if (!optarg) { FATAL("Missing path for -F"); }
+        if (!afl->is_main_node) {
+
+          FATAL(
+              "Option -F can only be specified after the -M option for the "
+              "main fuzzer of a fuzzing campaign");
+
+        }
+
+        if (afl->foreign_sync_cnt >= FOREIGN_SYNCS_MAX) {
+
+          FATAL("Maximum %u entried of -F option can be specified",
+                FOREIGN_SYNCS_MAX);
+
+        }
+
+        afl->foreign_syncs[afl->foreign_sync_cnt].dir = optarg;
+        while (afl->foreign_syncs[afl->foreign_sync_cnt]
+                   .dir[strlen(afl->foreign_syncs[afl->foreign_sync_cnt].dir) -
+                        1] == '/') {
+
+          afl->foreign_syncs[afl->foreign_sync_cnt]
+              .dir[strlen(afl->foreign_syncs[afl->foreign_sync_cnt].dir) - 1] =
+              0;
+
+        }
+
+        afl->foreign_sync_cnt++;
+        break;
+
+          /* target file */
+      case 'f':        //作用：设置 fuzzed 程序读取的文件位置，即被 fuzzed 程序在执行过程中会从该位置读取输入数据，以便在 fuzzing
+                 //   过程中能够根据用户指定的位置生成和使用测试输入文件，促进
+                 //   fuzzing 的效果和效率提升                                     
+
+        if (afl->fsrv.out_file) { FATAL("Multiple -f options not supported"); }
+        afl->fsrv.out_file = ck_strdup(optarg);
+        afl->fsrv.use_stdin = 0;
+        break;
+
+      case 'k': // 作用：设置初始 PoC 路径，即 fuzzing 过程中使用的初始测试用例的路径，以便在 fuzzing
+                 //   过程中能够根据用户指定的路径生成和使用初始测试用例，促进 fuzzing 的效果和效率提升
+        if (!optarg) { FATAL("Wrong usage of -k"); }
+        sscanf(optarg, "%s", afl->initial_poc_path);
+        break;
+        /* dictionary */
+      case 'x':       //作用：设置 fuzzer 字典，即 fuzzing 过程中使用的字典文件，以便在 fuzzing
+                 //   过程中能够根据用户指定的字典文件生成和使用测试输入，促进
+                 //    fuzzing 的效果和效率提升                                        
+
+        if (extras_dir_cnt >= 4) {
+
+          FATAL("More than four -x options are not supported");
+
+        }
+
+        extras_dir[extras_dir_cnt++] = optarg;
+        break;
+
+         /* timeout */
+      case 't': {        //作用：设置每次运行的超时时间，即 fuzzing 过程中每次执行被 fuzzed 程序的最大时间，以便在 fuzzing
+                   //    过程中能够根据用户指定的超时时间控制 fuzzing
+                   //    的速度和效率，避免过长的执行时间导致 fuzzing 效率降低                                       
+
+        u8 suffix = 0;
+
+        if (afl->timeout_given) { FATAL("Multiple -t options not supported"); }
+
+        if (!optarg ||
+            sscanf(optarg, "%u%c", &afl->fsrv.exec_tmout, &suffix) < 1 ||
+            optarg[0] == '-') {
+
+          FATAL("Bad syntax used for -t");
+
+        }
+
+        if (afl->fsrv.exec_tmout < 5) { FATAL("Dangerously low value of -t"); }
+
+        if (suffix == '+') {
+
+          afl->timeout_given = 2;
+
+        } else {
+
+          afl->timeout_given = 1;
+
+        }
+
+        break;
+
+      }
+
+              /* mem limit */
+      case 'm': {        //作用：设置子进程的内存限制，即 fuzzing 过程中被 fuzzed 程序的最大内存使用量，以便在 fuzzing
+                   //     过程中能够根据用户指定的内存限制控制 fuzzing
+                   //     的资源使用，避免过高的内存使用导致 fuzzing 效率降低                                      
+
+        u8 suffix = 'M';
+
+        if (mem_limit_given) { FATAL("Multiple -m options not supported"); }
+        mem_limit_given = 1;
+
+        if (!optarg) { FATAL("Wrong usage of -m"); }
+
+        if (!strcmp(optarg, "none")) {
+
+          afl->fsrv.mem_limit = 0;
+          break;
+
+        }
+
+        if (sscanf(optarg, "%llu%c", &afl->fsrv.mem_limit, &suffix) < 1 ||
+            optarg[0] == '-') {
+
+          FATAL("Bad syntax used for -m");
+
+        }
+
+        switch (suffix) {
+
+          case 'T':
+            afl->fsrv.mem_limit *= 1024 * 1024;
+            break;
+          case 'G':
+            afl->fsrv.mem_limit *= 1024;
+            break;
+          case 'k':
+            afl->fsrv.mem_limit /= 1024;
+            break;
+          case 'M':
+            break;
+
+          default:
+            FATAL("Unsupported suffix or bad syntax for -m");
+
+        }
+
+        if (afl->fsrv.mem_limit < 5) { FATAL("Dangerously low value of -m"); }
+
+        if (sizeof(rlim_t) == 4 && afl->fsrv.mem_limit > 2000) {
+
+          FATAL("Value of -m out of range on 32-bit systems");
+
+        }
+
+      }
+
+      break;
+      /* enforce deterministic */
+      case 'D':             //作用：启用确定性 fuzzing，即在 fuzzing 过程中每个队列条目只进行一次确定性变异，以便在 fuzzing
+                 //  过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进
+                 //  fuzzing 的效果提升                       
+
+        afl->skip_deterministic = 0;
+        break;
+
+          /* skip deterministic */
+      case 'd':         //作用：跳过确定性 fuzzing，即在 fuzzing 过程中不进行确定性变异，以便在 fuzzing
+                 //  过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing 的效果提升                            
+
+        afl->skip_deterministic = 1;
+        break;
+        /* load bitmap */
+      case 'B':    //作用：加载位图，即在 fuzzing 过程中使用用户指定的位图文件进行变异，以便在 fuzzing
+                 //   过程中能够根据用户指定的位图文件生成和使用测试输入，促进
+                 //   fuzzing 的效果提升                                          
+
+        /* This is a secret undocumented option! It is useful if you find
+           an interesting test case during a normal fuzzing process, and want
+           to mutate it without rediscovering any of the test cases already
+           found during an earlier run.
+
+           To use this mode, you need to point -B to the fuzz_bitmap produced
+           by an earlier run for the exact same binary... and that's it.
+
+           I only used this once or twice to get variants of a particular
+           file, so I'm not making this an official setting. */
+
+        if (afl->in_bitmap) { FATAL("Multiple -B options not supported"); }
+
+        afl->in_bitmap = optarg;
+        break;
+        /* crash mode */
+      case 'C':       //作用：启用崩溃探索模式，即在 fuzzing 过程中专注于发现和探索崩溃，以便在 fuzzing
+                 //   过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing 的效果提升                                        
+
+        if (afl->crash_mode) { FATAL("Multiple -C options not supported"); }
+        afl->crash_mode = FSRV_RUN_CRASH;
+        break;
+        /* dumb mode */
+      case 'n':     //作用：启用非 instrumented 模式，即在 fuzzing 过程中不使用任何 instrumentation 技术进行监控和分析，以便在 fuzzing
+                 //    过程中能够根据用户指定的配置控制 fuzzing
+                 //    的行为和效率，促进 fuzzing 的效果提升                                           
+
+        if (afl->is_main_node || afl->is_secondary_node) {
+
+          FATAL("Non instrumented mode is not supported with -M / -S");
+
+        }
+
+        if (afl->non_instrumented_mode) {
+
+          FATAL("Multiple -n options not supported");
+
+        }
+
+        if (afl->afl_env.afl_dumb_forksrv) {
+
+          afl->non_instrumented_mode = 2;
+
+        } else {
+
+          afl->non_instrumented_mode = 1;
+
+        }
+
+        break;
+        /* banner */
+      case 'T':       //作用：设置 banner，即在 fuzzing 过程中显示的标识信息，以便在 fuzzing
+                 //    过程中能够根据用户指定的 banner 显示相关信息，促进
+                 //    fuzzing 的效果提升                                            
+
+        if (afl->use_banner) { FATAL("Multiple -T options not supported"); }
+        afl->use_banner = optarg;
+        break;
+        /* FRIDA mode */
+      case 'O':        //作用：启用 FRIDA 模式，即在 fuzzing 过程中使用 FRIDA 技术进行监控和分析，以便在 fuzzing
+                 //    过程中能够根据用户指定的配置控制 fuzzing
+                 //     的行为和效率，促进 fuzzing 的效果提升                                       
+
+        if (afl->fsrv.frida_mode) {
+
+          FATAL("Multiple -O options not supported");
+
+        }
+
+        afl->fsrv.frida_mode = 1;
+        if (get_afl_env("AFL_USE_FASAN")) { afl->fsrv.frida_asan = 1; }
+
+        break;
+        /* QEMU mode */
+      case 'Q':          //作用：启用 QEMU 模式，即在 fuzzing 过程中使用 QEMU 技术进行监控和分析，以便在 fuzzing
+                 //    过程中能够根据用户指定的配置控制 fuzzing
+                 //     的行为和效率，促进 fuzzing 的效果提升                                     
+
+        if (afl->fsrv.qemu_mode) { FATAL("Multiple -Q options not supported"); }
+        afl->fsrv.qemu_mode = 1;
+
+        if (!mem_limit_given) { afl->fsrv.mem_limit = MEM_LIMIT_QEMU; }
+
+        break;
+        /* Unicorn mode */
+      case 'N':            //作用：启用 Unicorn 模式，即在 fuzzing 过程中使用 Unicorn 技术进行监控和分析，以便在 fuzzing
+                 //    过程中能够根据用户指定的配置控制 fuzzing
+                 //      的行为和效率，促进 fuzzing 的效果提升                                 
+
+        if (afl->no_unlink) { FATAL("Multiple -N options not supported"); }
+        afl->fsrv.no_unlink = (afl->no_unlink = true);
+
+        break;
+
+      case 'U':                                             /* Unicorn mode */
+
+        if (afl->unicorn_mode) { FATAL("Multiple -U options not supported"); }
+        afl->unicorn_mode = 1;
+
+        if (!mem_limit_given) { afl->fsrv.mem_limit = MEM_LIMIT_UNICORN; }
+
+        break;
+
+      case 'W':                                           /* Wine+QEMU mode */
+
+        if (afl->use_wine) { FATAL("Multiple -W options not supported"); }
+        afl->fsrv.qemu_mode = 1;
+        afl->use_wine = 1;
+
+        if (!mem_limit_given) { afl->fsrv.mem_limit = 0; }
+
+        break;
+
+      case 'V': { // 作用：设置最长执行时间，即 fuzzing 过程中每次执行被 fuzzed 程序的最长时间，以便在 fuzzing
+                 //    过程中能够根据用户指定的最长执行时间控制 fuzzing
+                   //    的速度和效率，避免过长的执行时间导致 fuzzing 效率降低
+
+        afl->most_time_key = 1;
+        if (!optarg || sscanf(optarg, "%llu", &afl->most_time) < 1 ||
+            optarg[0] == '-') {
+
+          FATAL("Bad syntax used for -V");
+
+        }
+
+      } break;
+
+      case 'E': { // 作用：设置最长执行次数，即 fuzzing 过程中每个测试用例的最长执行次数，以便在 fuzzing
+                 //    过程中能够根据用户指定的最长执行次数控制 fuzzing
+                   //    的速度和效率，避免过多的执行次数导致 fuzzing 效率降低
+
+        afl->most_execs_key = 1;
+        if (!optarg || sscanf(optarg, "%llu", &afl->most_execs) < 1 ||
+            optarg[0] == '-') {
+
+          FATAL("Bad syntax used for -E");
+
+        }
+
+      } break;
+
+      case 'l': {  // 作用：设置 CmpLog 功能的级别和选项，以便在 fuzzing
+                   // 过程中能够根据用户指定的配置启用和配置 CmpLog 功能，促进
+                   // fuzzing 的效果提升
+
+        if (!optarg) { FATAL("missing parameter for 'l'"); }
+        char *c = optarg;
+        while (*c) {
+
+          switch (*c) {
+
+            case '0':
+            case '1':
+              afl->cmplog_lvl = 1;
+              break;
+            case '2':
+              afl->cmplog_lvl = 2;
+              break;
+            case '3':
+              afl->cmplog_lvl = 3;
+
+              if (!afl->disable_trim) {
+
+                ACTF("Deactivating trimming due CMPLOG level 3");
+                afl->disable_trim = 1;
+
+              }
+
+              break;
+            case 'a':
+            case 'A':
+              afl->cmplog_enable_arith = 1;
+              break;
+            case 't':
+            case 'T':
+              afl->cmplog_enable_transform = 1;
+              break;
+            default:
+              FATAL("Unknown option value '%c' in -l %s", *c, optarg);
+
+          }
+
+          ++c;
+
+        }
+
+        if (afl->cmplog_lvl == CMPLOG_LVL_MAX) {
+
+          afl->cmplog_max_filesize = MAX_FILE;
+
+        }
+
+      } break;
+
+      case 'L': { 
+        /* MOpt mode */  // 作用：设置 MOpt 模式的相关参数，包括限制时间、启用
+                         // MOpt 模式等
+
+        if (afl->limit_time_sig) { FATAL("Multiple -L options not supported"); }
+        afl->havoc_max_mult = HAVOC_MAX_MULT_MOPT;
+
+        if (sscanf(optarg, "%d", &afl->limit_time_puppet) < 1) {
+
+          FATAL("Bad syntax used for -L");
+
+        }
+
+        if (afl->limit_time_puppet == -1) {
+
+          afl->limit_time_sig = -1;
+          afl->limit_time_puppet = 0;
+
+        } else if (afl->limit_time_puppet < 0) {
+
+          FATAL("-L value must be between 0 and 2000000 or -1");
+
+        } else {
+
+          afl->limit_time_sig = 1;
+
+        }
+
+        u64 limit_time_puppet2 = afl->limit_time_puppet * 60 * 1000;
+
+        if ((s32)limit_time_puppet2 < afl->limit_time_puppet) {
+
+          FATAL("limit_time overflow");
+
+        }
+
+        afl->limit_time_puppet = limit_time_puppet2;
+        afl->swarm_now = 0;
+        if (afl->limit_time_puppet == 0) { afl->key_puppet = 1; }
+
+        int j;
+        int tmp_swarm = 0;
+
+        if (afl->g_now > afl->g_max) { afl->g_now = 0; }
+        afl->w_now = (afl->w_init - afl->w_end) * (afl->g_max - afl->g_now) /
+                         (afl->g_max) +
+                     afl->w_end;
+
+        for (tmp_swarm = 0; tmp_swarm < swarm_num; ++tmp_swarm) {
+
+          double total_puppet_temp = 0.0;
+          afl->swarm_fitness[tmp_swarm] = 0.0;
+
+          for (j = 0; j < operator_num; ++j) {
+
+            afl->stage_finds_puppet[tmp_swarm][j] = 0;
+            afl->probability_now[tmp_swarm][j] = 0.0;
+            afl->x_now[tmp_swarm][j] =
+                ((double)(random() % 7000) * 0.0001 + 0.1);
+            total_puppet_temp += afl->x_now[tmp_swarm][j];
+            afl->v_now[tmp_swarm][j] = 0.1;
+            afl->L_best[tmp_swarm][j] = 0.5;
+            afl->G_best[j] = 0.5;
+            afl->eff_best[tmp_swarm][j] = 0.0;
+
+          }
+
+          for (j = 0; j < operator_num; ++j) {
+
+            afl->stage_cycles_puppet_v2[tmp_swarm][j] =
+                afl->stage_cycles_puppet[tmp_swarm][j];
+            afl->stage_finds_puppet_v2[tmp_swarm][j] =
+                afl->stage_finds_puppet[tmp_swarm][j];
+            afl->x_now[tmp_swarm][j] =
+                afl->x_now[tmp_swarm][j] / total_puppet_temp;
+
+          }
+
+          double x_temp = 0.0;
+
+          for (j = 0; j < operator_num; ++j) {
+
+            afl->probability_now[tmp_swarm][j] = 0.0;
+            afl->v_now[tmp_swarm][j] =
+                afl->w_now * afl->v_now[tmp_swarm][j] +
+                RAND_C *
+                    (afl->L_best[tmp_swarm][j] - afl->x_now[tmp_swarm][j]) +
+                RAND_C * (afl->G_best[j] - afl->x_now[tmp_swarm][j]);
+
+            afl->x_now[tmp_swarm][j] += afl->v_now[tmp_swarm][j];
+
+            if (afl->x_now[tmp_swarm][j] > v_max) {
+
+              afl->x_now[tmp_swarm][j] = v_max;
+
+            } else if (afl->x_now[tmp_swarm][j] < v_min) {
+
+              afl->x_now[tmp_swarm][j] = v_min;
+
+            }
+
+            x_temp += afl->x_now[tmp_swarm][j];
+
+          }
+
+          for (j = 0; j < operator_num; ++j) {
+
+            afl->x_now[tmp_swarm][j] = afl->x_now[tmp_swarm][j] / x_temp;
+            if (likely(j != 0)) {
+
+              afl->probability_now[tmp_swarm][j] =
+                  afl->probability_now[tmp_swarm][j - 1] +
+                  afl->x_now[tmp_swarm][j];
+
+            } else {
+
+              afl->probability_now[tmp_swarm][j] = afl->x_now[tmp_swarm][j];
+
+            }
+
+          }
+
+          if (afl->probability_now[tmp_swarm][operator_num - 1] < 0.99 ||
+              afl->probability_now[tmp_swarm][operator_num - 1] > 1.01) {
+
+            FATAL("ERROR probability");
+
+          }
+
+        }
+
+        for (j = 0; j < operator_num; ++j) {
+
+          afl->core_operator_finds_puppet[j] = 0;
+          afl->core_operator_finds_puppet_v2[j] = 0;
+          afl->core_operator_cycles_puppet[j] = 0;
+          afl->core_operator_cycles_puppet_v2[j] = 0;
+          afl->core_operator_cycles_puppet_v3[j] = 0;
+
+        }
+
+      } break;
+
+      case 'h':  // 作用：显示帮助信息，即在 fuzzing
+                 // 过程中显示命令行选项和使用说明，以便用户能够了解和使用
+                 // afl-fuzz 的功能和配置选项
+        show_help++;
+        break;  // not needed
+
+      case 'R': // 作用：启用 Radamsa 模式，即在 fuzzing 过程中使用 Radamsa 技术进行变异，以便在 fuzzing
+                 // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进
+                 // fuzzing 的效果提升
+
+        FATAL(
+            "Radamsa is now a custom mutator, please use that "
+            "(custom_mutators/radamsa/).");
+
+        break;
+
+      default:
+        if (!show_help) { show_help = 1; }
+
+    }
+
+  }
+
+  if (optind == argc || !afl->in_dir || !afl->out_dir || show_help) { 
+
+    usage(argv[0], show_help);
+
+  }
+
+  if (unlikely(afl->afl_env.afl_persistent_record)) {
+
+  #ifdef AFL_PERSISTENT_RECORD
+
+    afl->fsrv.persistent_record = atoi(afl->afl_env.afl_persistent_record);
+
+    if (afl->fsrv.persistent_record < 2) {
+
+      FATAL(
+          "AFL_PERSISTENT_RECORD value must be be at least 2, recommended is "
+          "100 or 1000.");
+
+    }
+
+  #else
+
+    FATAL(
+        "afl-fuzz was not compiled with AFL_PERSISTENT_RECORD enabled in "
+        "config.h!");
+
+  #endif
+
+  }
+
+  if (afl->fsrv.mem_limit && afl->shm.cmplog_mode) afl->fsrv.mem_limit += 260;
+
+  OKF("afl++ is maintained by Marc \"van Hauser\" Heuse, Heiko \"hexcoder\" "
+      "Eißfeldt, Andrea Fioraldi and Dominik Maier");
+  OKF("afl++ is open source, get it at "
+      "https://github.com/AFLplusplus/AFLplusplus");
+  OKF("NOTE: This is v3.x which changes defaults and behaviours - see "
+      "README.md");
+
+  if (afl->sync_id && afl->is_main_node &&
+      afl->afl_env.afl_custom_mutator_only) { 
+
+    WARNF(
+        "Using -M main node with the AFL_CUSTOM_MUTATOR_ONLY mutator options "
+        "will result in no deterministic mutations being done!");
+
+  }
+
+  if (afl->fixed_seed) {
+
+    OKF("Running with fixed seed: %u", (u32)afl->init_seed);
+
+  }
+
+  #if defined(__SANITIZE_ADDRESS__)
+  if (afl->fsrv.mem_limit) {
+
+    WARNF("in the ASAN build we disable all memory limits");
+    afl->fsrv.mem_limit = 0;
+
+  }
+
+  #endif
+
+  afl->fsrv.kill_signal =
+      parse_afl_kill_signal_env(afl->afl_env.afl_kill_signal, SIGKILL);
+
+  setup_signal_handlers();
+  check_asan_opts(afl);
+
+  afl->power_name = power_names[afl->schedule];
+
+  if (!afl->non_instrumented_mode && !afl->sync_id) {
+
+    auto_sync = 1;
+    afl->sync_id = ck_strdup("default");
+    afl->is_secondary_node = 1;
+    OKF("No -M/-S set, autoconfiguring for \"-S %s\"", afl->sync_id);
+
+  }
+
+  if (afl->sync_id) { fix_up_sync(afl); }
+
+  if (!strcmp(afl->in_dir, afl->out_dir)) {
+
+    FATAL("Input and output directories can't be the same");
+
+  }
+
+  if (afl->non_instrumented_mode) { 
+
+    if (afl->crash_mode) { FATAL("-C and -n are mutually exclusive"); }
+    if (afl->fsrv.frida_mode) { FATAL("-O and -n are mutually exclusive"); }
+    if (afl->fsrv.qemu_mode) { FATAL("-Q and -n are mutually exclusive"); }
+    if (afl->unicorn_mode) { FATAL("-U and -n are mutually exclusive"); }
+
+  }
+
+  setenv("__AFL_OUT_DIR", afl->out_dir, 1);
+
+  if (get_afl_env("AFL_DISABLE_TRIM")) { afl->disable_trim = 1; }
+
+  if (getenv("AFL_NO_UI") && getenv("AFL_FORCE_UI")) {
+
+    FATAL("AFL_NO_UI and AFL_FORCE_UI are mutually exclusive");
+
+  }
+
+  if (unlikely(afl->afl_env.afl_statsd)) { statsd_setup_format(afl); }
+
+  if (strchr(argv[optind], '/') == NULL && !afl->unicorn_mode) {
+
+    WARNF(cLRD
+          "Target binary called without a prefixed path, make sure you are "
+          "fuzzing the right binary: " cRST "%s",
+          argv[optind]);
+
+  }
+
+  ACTF("Getting to work...");
+
+  switch (afl->schedule) { 
+
+    case FAST:
+      OKF("Using exponential power schedule (FAST)");
+      break;
+    case COE:
+      OKF("Using cut-off exponential power schedule (COE)");
+      break;
+    case EXPLOIT:
+      OKF("Using exploitation-based constant power schedule (EXPLOIT)");
+      break;
+    case LIN:
+      OKF("Using linear power schedule (LIN)");
+      break;
+    case QUAD:
+      OKF("Using quadratic power schedule (QUAD)");
+      break;
+    case MMOPT:
+      OKF("Using modified MOpt power schedule (MMOPT)");
+      break;
+    case RARE:
+      OKF("Using rare edge focus power schedule (RARE)");
+      break;
+    case SEEK:
+      OKF("Using seek power schedule (SEEK)");
+      break;
+    case EXPLORE:
+      OKF("Using exploration-based constant power schedule (EXPLORE)");
+      break;
+    default:
+      FATAL("Unknown power schedule");
+      break;
+
+  }
+
+  if (afl->shm.cmplog_mode) {
+    OKF("CmpLog level: %u", afl->cmplog_lvl);
+  }  // 显示 CmpLog 的级别，以便用户能够了解和使用 CmpLog 功能
+
+  /* Dynamically allocate memory for AFLFast schedules */
+  if (afl->schedule >= FAST && afl->schedule <= RARE) {
+
+    afl->n_fuzz = ck_alloc(N_FUZZ_SIZE * sizeof(u32));
+
+  }
+
+  if (get_afl_env("AFL_NO_FORKSRV")) { afl->no_forkserver = 1; }
+  if (get_afl_env("AFL_NO_CPU_RED")) { afl->no_cpu_meter_red = 1; }
+  if (get_afl_env("AFL_NO_ARITH")) { afl->no_arith = 1; }
+  if (get_afl_env("AFL_SHUFFLE_QUEUE")) { afl->shuffle_queue = 1; }
+  if (get_afl_env("AFL_EXPAND_HAVOC_NOW")) { afl->expand_havoc = 1; }
+
+  if (afl->afl_env.afl_autoresume) {  // 作用：启用自动恢复功能，即在 fuzzing 过程中自动恢复之前的 fuzzing 状态，以便在 fuzzing 过程中能够根据用户指定的配置控制
+                              // fuzzing 的行为和效率，促进 fuzzing 的效果提升
+
+    afl->autoresume = 1;
+    if (afl->in_place_resume) {
+
+      SAYF("AFL_AUTORESUME has no effect for '-i -'");
+
+    }
+
+  }
+
+  if (afl->afl_env.afl_hang_tmout) { // 作用：设置挂起超时时间，即在 fuzzing 过程中被 fuzzed 程序挂起的最大时间，以便在 fuzzing
+    // 过程中能够根据用户指定的挂起超时时间控制 fuzzing
+    // 的行为和效率，避免过长的挂起时间导致 fuzzing 效率降低
+
+    s32 hang_tmout = atoi(afl->afl_env.afl_hang_tmout);
+    if (hang_tmout < 1) { FATAL("Invalid value for AFL_HANG_TMOUT"); }
+    afl->hang_tmout = (u32)hang_tmout;
+
+  }
+
+  if (afl->afl_env
+          .afl_exit_on_time) {  // 作用：设置最长运行时间，即 fuzzing 过程中
+                                // fuzzing 的最长时间，以便在 fuzzing
+
+    u64 exit_on_time = atoi(afl->afl_env.afl_exit_on_time);
+    afl->exit_on_time = (u64)exit_on_time * 1000;
+
+  }
+
+  if (afl->afl_env
+          .afl_max_det_extras) {  // 作用：设置最大确定性变异数，即在 fuzzing
+                                  // 过程中每个队列条目的最大确定性变异数，以便在
+                                  // fuzzing
+
+    s32 max_det_extras = atoi(afl->afl_env.afl_max_det_extras);
+    if (max_det_extras < 1) { FATAL("Invalid value for AFL_MAX_DET_EXTRAS"); }
+    afl->max_det_extras = (u32)max_det_extras;
+
+  } else {
+
+    afl->max_det_extras = MAX_DET_EXTRAS;
+
+  }
+
+  if (afl->afl_env
+          .afl_testcache_size) {  // 作用：设置测试缓存大小，即在 fuzzing
+                                  // 过程中用于缓存测试用例的最大内存大小，以便在
+                                  // fuzzing
+
+    afl->q_testcase_max_cache_size =
+        (u64)atoi(afl->afl_env.afl_testcache_size) * 1048576;
+
+  }
+
+  if (afl->afl_env
+          .afl_testcache_entries) {  // 作用：设置测试缓存条目数，即在 fuzzing
+                                     // 过程中用于缓存测试用例的最大条目数，以便在
+                                     // fuzzing
+
+    afl->q_testcase_max_cache_entries =
+        (u32)atoi(afl->afl_env.afl_testcache_entries);
+
+    // user_set_cache = 1;
+
+  }
+
+  if (!afl->afl_env.afl_testcache_size || !afl->afl_env.afl_testcache_entries) {
+
+    afl->afl_env.afl_testcache_entries = 0;
+    afl->afl_env.afl_testcache_size = 0;
+
+  }
+
+  if (!afl->q_testcase_max_cache_size) {
+
+    ACTF(
+        "No testcache was configured. it is recommended to use a testcache, it "
+        "improves performance: set AFL_TESTCACHE_SIZE=(value in MB)");
+
+  } else if (afl->q_testcase_max_cache_size < 2 * MAX_FILE) {
+
+    FATAL("AFL_TESTCACHE_SIZE must be set to %u or more, or 0 to disable",
+          (2 * MAX_FILE) % 1048576 == 0 ? (2 * MAX_FILE) / 1048576
+                                        : 1 + ((2 * MAX_FILE) / 1048576));
+
+  } else {
+
+    OKF("Enabled testcache with %llu MB",
+        afl->q_testcase_max_cache_size / 1048576);
+
+  }
+
+  if (afl->afl_env.afl_forksrv_init_tmout) {
+
+    afl->fsrv.init_tmout = atoi(afl->afl_env.afl_forksrv_init_tmout);
+    if (!afl->fsrv.init_tmout) {
+
+      FATAL("Invalid value of AFL_FORKSRV_INIT_TMOUT");
+
+    }
+
+  } else {
+
+    afl->fsrv.init_tmout = afl->fsrv.exec_tmout * FORK_WAIT_MULT;
+
+  }
+
+  if (afl->afl_env.afl_crash_exitcode) {
+
+    long exitcode = strtol(afl->afl_env.afl_crash_exitcode, NULL, 10);
+    if ((!exitcode && (errno == EINVAL || errno == ERANGE)) ||
+        exitcode < -127 || exitcode > 128) {
+
+      FATAL("Invalid crash exitcode, expected -127 to 128, but got %s",
+            afl->afl_env.afl_crash_exitcode);
+
+    }
+
+    afl->fsrv.uses_crash_exitcode = true;
+    // WEXITSTATUS is 8 bit unsigned
+    afl->fsrv.crash_exitcode = (u8)exitcode;
+
+  }
+
+  if (afl->non_instrumented_mode == 2 && afl->no_forkserver) {
+
+    FATAL("AFL_DUMB_FORKSRV and AFL_NO_FORKSRV are mutually exclusive");
+
+  }
+
+  afl->fsrv.use_fauxsrv = afl->non_instrumented_mode == 1 || afl->no_forkserver;
+
+  check_crash_handling();
+  check_cpu_governor(afl);
+
+  if (getenv("LD_PRELOAD")) {  // 作用：检查 LD_PRELOAD 环境变量，即在 fuzzing
+                               // 过程中检查用户是否设置了 LD_PRELOAD
+                               // 环境变量，以便在 fuzzing
+
+    WARNF(
+        "LD_PRELOAD is set, are you sure that is what to you want to do "
+        "instead of using AFL_PRELOAD?");
+
+  }
+
+  if (afl->afl_env.afl_preload) {
+
+    if (afl->fsrv.qemu_mode) {
+
+      /* afl-qemu-trace takes care of converting AFL_PRELOAD. */
+
+    } else if (afl->fsrv.frida_mode) {
+
+      afl_preload = getenv("AFL_PRELOAD");
+      u8 *frida_binary = find_afl_binary(argv[0], "afl-frida-trace.so");
+      OKF("Injecting %s ...", frida_binary);
+      if (afl_preload) {
+
+        if (afl->fsrv.frida_asan) {
+
+          OKF("Using Frida Address Sanitizer Mode");
+
+          fasan_check_afl_preload(afl_preload);
+
+          setenv("ASAN_OPTIONS", "detect_leaks=false", 1);
+
+        }
+
+        u8 *frida_binary = find_afl_binary(argv[0], "afl-frida-trace.so");
+        OKF("Injecting %s ...", frida_binary);
+        frida_afl_preload = alloc_printf("%s:%s", afl_preload, frida_binary);
+
+        ck_free(frida_binary);
+
+        setenv("LD_PRELOAD", frida_afl_preload, 1);
+        setenv("DYLD_INSERT_LIBRARIES", frida_afl_preload, 1);
+
+      }
+
+    } else {
+
+      setenv("LD_PRELOAD", getenv("AFL_PRELOAD"), 1);
+      setenv("DYLD_INSERT_LIBRARIES", getenv("AFL_PRELOAD"), 1);
+
+    }
+
+  } else if (afl->fsrv.frida_mode) {
+
+    if (afl->fsrv.frida_asan) {
+
+      OKF("Using Frida Address Sanitizer Mode");
+      FATAL(
+          "Address Sanitizer DSO must be loaded using AFL_PRELOAD in Frida "
+          "Address Sanitizer Mode");
+
+    } else {
+
+      u8 *frida_binary = find_afl_binary(argv[0], "afl-frida-trace.so");
+      OKF("Injecting %s ...", frida_binary);
+      setenv("LD_PRELOAD", frida_binary, 1);
+      setenv("DYLD_INSERT_LIBRARIES", frida_binary, 1);
+      ck_free(frida_binary);
+
+    }
+
+  }
+
+  if (getenv("AFL_LD_PRELOAD")) {
+
+    FATAL("Use AFL_PRELOAD instead of AFL_LD_PRELOAD");
+
+  }
+
+  if (afl->afl_env.afl_target_env &&
+      !extract_and_set_env(afl->afl_env.afl_target_env)) {
+
+    FATAL("Bad value of AFL_TARGET_ENV");
+
+  } 
+
+  save_cmdline(afl, argc, argv);
+
+  fix_up_banner(afl, argv[optind]);
+
+  check_if_tty(afl);
+  if (afl->afl_env.afl_force_ui) { afl->not_on_tty = 0; }
+
+  if (afl->afl_env.afl_custom_mutator_only) {
+
+    /* This ensures we don't proceed to havoc/splice */
+    afl->custom_only = 1;
+
+    /* Ensure we also skip all deterministic steps */
+    afl->skip_deterministic = 1;
+
+  }
+
+  get_core_count(afl);
+
+  atexit(at_exit);
+
+  setup_dirs_fds(afl);
+
+  #ifdef HAVE_AFFINITY
+  bind_to_free_cpu(afl);
+  #endif                                                   /* HAVE_AFFINITY */
+
+  #ifdef __HAIKU__
+  /* Prioritizes performance over power saving */
+  set_scheduler_mode(SCHEDULER_MODE_LOW_LATENCY);
+  #endif
+
+  #ifdef __APPLE__
+  if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0) {
+
+    WARNF("general thread priority settings failed");
+
+  }
+
+  #endif
+
+  init_count_class16();
+
+  if (afl->is_main_node && check_main_node_exists(afl) == 1) {
+
+    WARNF("it is wasteful to run more than one main node!");
+    sleep(1);
+
+  } else if (!auto_sync && afl->is_secondary_node &&
+
+             check_main_node_exists(afl) == 0) {
+
+    WARNF(
+        "no -M main node found. It is recommended to run exactly one main "
+        "instance.");
+    sleep(1);
+
+  }
+
+  #ifdef RAND_TEST_VALUES
+  u32 counter;
+  for (counter = 0; counter < 100000; counter++)
+    printf("DEBUG: rand %06d is %u\n", counter, rand_below(afl, 65536));
+  #endif
+
+  setup_custom_mutators(afl);
+
+  write_setup_file(afl, argc, argv);
+
+  setup_cmdline_file(afl, argv + optind);
+
+  read_testcases(afl, NULL);
+  // read_foreign_testcases(afl, 1); for the moment dont do this
+  OKF("Loaded a total of %u seeds.", afl->queued_paths);
+
+  pivot_inputs(afl);
+
+  if (!afl->timeout_given) { find_timeout(afl); }  // only for resumes!
+
+  if ((afl->tmp_dir = afl->afl_env.afl_tmpdir) != NULL &&
+      !afl->in_place_resume) {
+
+    char tmpfile[PATH_MAX];
+
+    if (afl->file_extension) {
+
+      snprintf(tmpfile, PATH_MAX, "%s/.cur_input.%s", afl->tmp_dir,
+               afl->file_extension);
+
+    } else {
+
+      snprintf(tmpfile, PATH_MAX, "%s/.cur_input", afl->tmp_dir);
+
+    }
+
+    /* there is still a race condition here, but well ... */
+    if (access(tmpfile, F_OK) != -1) {
+
+      FATAL(
+          "AFL_TMPDIR already has an existing temporary input file: %s - if "
+          "this is not from another instance, then just remove the file.",
+          tmpfile);
+
+    }
+
+  } else {
+
+    afl->tmp_dir = afl->out_dir;
+
+  }
+
+  /* If we don't have a file name chosen yet, use a safe default. */
+
+  if (!afl->fsrv.out_file) {
+
+    u32 j = optind + 1;
+    while (argv[j]) {
+
+      u8 *aa_loc = strstr(argv[j], "@@");
+
+      if (aa_loc && !afl->fsrv.out_file) {
+
+        afl->fsrv.use_stdin = 0;
+
+        if (afl->file_extension) {
+
+          afl->fsrv.out_file = alloc_printf("%s/.cur_input.%s", afl->tmp_dir,
+                                            afl->file_extension);
+
+        } else {
+
+          afl->fsrv.out_file = alloc_printf("%s/.cur_input", afl->tmp_dir);
+
+        }
+
+        detect_file_args(argv + optind + 1, afl->fsrv.out_file,
+                         &afl->fsrv.use_stdin);
+        break;
+
+      }
+
+      ++j;
+
+    }
+
+  }
+
+  if (!afl->fsrv.out_file) { setup_stdio_file(afl); }
+
+  setenv(EVOCATIO_ENV_CAPFUZZ, "1", 1);
+  if (!(afl->fsrv.pCapResFilePath = get_afl_env(EVOCATIO_ENV_RESPATH))) {
+    //if user set it, we just use it. Otherwise use a default.
+    u8 cwd[PATH_MAX];
+    if (getcwd(cwd, (size_t)sizeof(cwd)) == NULL) { PFATAL("getcwd() failed"); }
+
+    if (afl->tmp_dir[0] == '/') //use path-detect behavior of .cur_input in detect_file_args
+      { afl->fsrv.pCapResFilePath = alloc_printf("%s/.cap_res_file"   ,      afl->tmp_dir); }
+    else
+      { afl->fsrv.pCapResFilePath = alloc_printf("%s/%s/.cap_res_file", cwd, afl->tmp_dir); }
+
+    if (unlink(afl->fsrv.pCapResFilePath) && errno != ENOENT) //make sure we start from scratch
+      { PFATAL("Your %s is bad", afl->fsrv.pCapResFilePath); }
+
+    setenv(EVOCATIO_ENV_RESPATH, afl->fsrv.pCapResFilePath, 1);
+  }
+
+  if (!(afl->fsrv.sleuthResFilePath = get_afl_env(SLEUTH_ENV_RESPATH))) {
+    //if user set it, we just use it. Otherwise use a default.
+    u8 cwd[PATH_MAX];
+    if (getcwd(cwd, (size_t)sizeof(cwd)) == NULL) { PFATAL("getcwd() failed"); }
+    
+    if (afl->tmp_dir[0] == '/')
+      { afl->fsrv.sleuthResFilePath = alloc_printf("%s/.pos_res_file", afl->tmp_dir); }
+    else 
+      { afl->fsrv.sleuthResFilePath = alloc_printf("%s/%s/.pos_res_file", cwd, afl->tmp_dir); }
+
+    if (unlikely(afl->fsrv.sleuthResFilePath) && errno != ENOENT)
+      { PFATAL("Your %s is bad", afl->fsrv.sleuthResFilePath); }
+
+    setenv(SLEUTH_ENV_RESPATH, afl->fsrv.sleuthResFilePath, 1);
+  }
+
+#if EVOCATIO_PLZ_HELP_RESPATH
+  FILE *fp = fopen(afl->fsrv.pCapResFilePath, "w"); // use ANSI-C style, same as bug-severity-rt-asan.o
+  if (fp) {
+    //it should indicate a safe virgin cap_res_file for both hash and text
+    fprintf(fp, "CAP"EVOCATIO_IDENTIFIER"CAP"EVOCATIO_IDENTIFIER"CAP"EVOCATIO_IDENTIFIER"CAP");
+  } else {
+    PFATAL("Sorry I can't help %s", afl->fsrv.pCapResFilePath);
+  }
+  fclose(fp);
+#endif
+
+# if SLEUTH_PLZ_HELP_RESPATH
+  FILE *fp_2 = fopen(afl->fsrv.sleuthResFilePath, "w");
+  if (fp_2) {
+    fprintf(fp_2, "POS"EVOCATIO_IDENTIFIER);
+  } else {
+    PFATAL("Sorry I can't help %s", afl->fsrv.sleuthResFilePath);
+  }
+  fclose(fp_2);
+# endif
+
+  if (afl->cmplog_binary) {
+
+    if (afl->unicorn_mode) {
+
+      FATAL("CmpLog and Unicorn mode are not compatible at the moment, sorry");
+
+    }
+
+    if (!afl->fsrv.qemu_mode && !afl->fsrv.frida_mode &&
+        !afl->non_instrumented_mode) {
+
+      check_binary(afl, afl->cmplog_binary);
+
+    }
+
+  }
+
+  check_binary(afl, argv[optind]);
+
+  #ifdef AFL_PERSISTENT_RECORD
+  if (unlikely(afl->fsrv.persistent_record)) {
+
+    if (!getenv(PERSIST_ENV_VAR)) {
+
+      FATAL(
+          "Target binary is not compiled in persistent mode, "
+          "AFL_PERSISTENT_RECORD makes no sense.");
+
+    }
+
+    afl->fsrv.persistent_record_dir = alloc_printf("%s/crashes", afl->out_dir);
+
+  }
+
+  #endif
+
+  if (afl->shmem_testcase_mode) { setup_testcase_shmem(afl); }
+
+  afl->start_time = get_cur_time();
+
+  if (afl->fsrv.qemu_mode) {
+
+    if (afl->use_wine) {
+
+      use_argv = get_wine_argv(argv[0], &afl->fsrv.target_path, argc - optind,
+                               argv + optind);
+
+    } else {
+
+      use_argv = get_qemu_argv(argv[0], &afl->fsrv.target_path, argc - optind,
+                               argv + optind);
+
+    }
+
+  } else {
+
+    use_argv = argv + optind;
+
+  }
+
+  if (afl->non_instrumented_mode || afl->fsrv.qemu_mode ||
+      afl->fsrv.frida_mode || afl->unicorn_mode) {
+
+    map_size = afl->fsrv.map_size = MAP_SIZE;
+    afl->virgin_bits = ck_realloc(afl->virgin_bits, map_size);
+    afl->virgin_tmout = ck_realloc(afl->virgin_tmout, map_size);
+    afl->virgin_crash = ck_realloc(afl->virgin_crash, map_size);
+    afl->var_bytes = ck_realloc(afl->var_bytes, map_size);
+    afl->top_rated = ck_realloc(afl->top_rated, map_size * sizeof(void *));
+    afl->clean_trace = ck_realloc(afl->clean_trace, map_size);
+    afl->clean_trace_custom = ck_realloc(afl->clean_trace_custom, map_size);
+    afl->first_trace = ck_realloc(afl->first_trace, map_size);
+    afl->map_tmp_buf = ck_realloc(afl->map_tmp_buf, map_size);
+
+    afl->virgin_capability = ck_realloc(afl->virgin_capability,
+                                        MAX_CAPABILITY_NUM * sizeof(u32));
+
+    afl->virgin_position = ck_realloc(afl->virgin_position,
+                                      MAX_POSITION_NUM * sizeof(u32));
+
+    /* Add by wei at 31/5/2023 */
+    afl->related_bits = ck_realloc(afl->related_bits, sizeof(u32) * TARGET_MAP);
+    afl->related_crash = ck_realloc(afl->related_crash, sizeof(u32) * TARGET_MAP);
+    /* Add End */
+
+  }
+
+  afl->argv = use_argv;
+  afl->fsrv.trace_bits =
+      afl_shm_init(&afl->shm, afl->fsrv.map_size, afl->non_instrumented_mode);
+
+  /* Add by wei at 26/5/2023 */
+  afl->fsrv.target_bits = afl->shm.target_map; //专门收集目标漏洞代码块执行覆盖率，和普通路径覆盖率隔离，实现定向fuzz
+  /* Add End */
+  
+  if (!afl->non_instrumented_mode && !afl->fsrv.qemu_mode &&
+      !afl->unicorn_mode && !afl->fsrv.frida_mode &&
+      !afl->afl_env.afl_skip_bin_check) {  // 作用：检查二进制文件，即在 fuzzing
+                                           // 过程中检查目标二进制文件的兼容性和正确性，以便在
+                                           // fuzzing
+
+    if (map_size <= DEFAULT_SHMEM_SIZE) { // 作用：设置共享内存映射大小，即在 fuzzing 过程中设置共享内存映射的大小，以便在 fuzzing
+                                     // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进
+      // fuzzing 的效果提升
+
+      afl->fsrv.map_size = DEFAULT_SHMEM_SIZE;  // dummy temporary value
+      char vbuf[16];
+      snprintf(vbuf, sizeof(vbuf), "%u", DEFAULT_SHMEM_SIZE);
+      setenv("AFL_MAP_SIZE", vbuf, 1);
+
+    }
+
+    u32 new_map_size = afl_fsrv_get_mapsize(
+        &afl->fsrv, afl->argv, &afl->stop_soon,
+        afl->afl_env
+            .afl_debug_child);  // 作用：获取映射大小，即在 fuzzing
+                                // 过程中获取共享内存映射的大小
+
+    // only reinitialize if the map needs to be larger than what we have.
+    if (map_size <
+        new_map_size) {  // 作用：重新初始化映射，即在 fuzzing
+                         // 过程中重新初始化共享内存映射，以便在 fuzzing
+
+      OKF("Re-initializing maps to %u bytes", new_map_size);
+
+      afl->virgin_bits = ck_realloc(afl->virgin_bits, new_map_size);
+      afl->virgin_tmout = ck_realloc(afl->virgin_tmout, new_map_size);
+      afl->virgin_crash = ck_realloc(afl->virgin_crash, new_map_size);
+      afl->var_bytes = ck_realloc(afl->var_bytes, new_map_size);
+      afl->top_rated =
+          ck_realloc(afl->top_rated, new_map_size * sizeof(void *));
+      afl->clean_trace = ck_realloc(afl->clean_trace, new_map_size);
+      afl->clean_trace_custom =
+          ck_realloc(afl->clean_trace_custom, new_map_size);
+      afl->first_trace = ck_realloc(afl->first_trace, new_map_size);
+      afl->map_tmp_buf = ck_realloc(afl->map_tmp_buf, new_map_size);
+
+      afl->virgin_capability = ck_realloc(afl->virgin_capability,
+                                          MAX_CAPABILITY_NUM * sizeof(u32));
+
+      afl->virgin_position = ck_realloc(afl->virgin_position,
+                                        MAX_POSITION_NUM * sizeof(u32));
+
+      /* Add by wei at 31/5/2023 */
+      afl->related_bits = ck_realloc(afl->related_bits, sizeof(u32) * TARGET_MAP); // 专门收集与漏洞相关的代码块执行覆盖率，和普通路径覆盖率隔离，实现定向fuzz
+      afl->related_crash = ck_realloc(afl->related_crash, sizeof(u32) * TARGET_MAP); // 专门收集与漏洞相关的代码块导致的崩溃信息，和普通崩溃信息隔离，实现定向fuzz
+      /* Add End */
+      
+      afl_fsrv_kill(&afl->fsrv);
+      afl_shm_deinit(&afl->shm);
+      afl->fsrv.map_size = new_map_size;
+      afl->fsrv.trace_bits =
+          afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode);
+
+      /* Add by wei at 26/5/2023 */
+      afl->fsrv.target_bits = afl->shm.target_map; //专门收集目标漏洞代码块执行覆盖率，和普通路径覆盖率隔离，实现定向fuzz
+      /* Add END*/
+
+      setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
+      afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
+                     afl->afl_env.afl_debug_child);
+
+      map_size = new_map_size;
+
+    }
+
+  }
+
+  if (afl->cmplog_binary) {
+
+    ACTF("Spawning cmplog forkserver");
+    afl_fsrv_init_dup(&afl->cmplog_fsrv, &afl->fsrv);
+    // TODO: this is semi-nice
+    afl->cmplog_fsrv.trace_bits = afl->fsrv.trace_bits;
+    afl->cmplog_fsrv.qemu_mode = afl->fsrv.qemu_mode;
+    afl->cmplog_fsrv.frida_mode = afl->fsrv.frida_mode;
+    afl->cmplog_fsrv.cmplog_binary = afl->cmplog_binary;
+    afl->cmplog_fsrv.init_child_func = cmplog_exec_child;
+
+    if ((map_size <= DEFAULT_SHMEM_SIZE ||
+         afl->cmplog_fsrv.map_size < map_size) &&
+        !afl->non_instrumented_mode && !afl->fsrv.qemu_mode &&
+        !afl->fsrv.frida_mode && !afl->unicorn_mode &&
+        !afl->afl_env.afl_skip_bin_check) {
+
+      afl->cmplog_fsrv.map_size = MAX(map_size, (u32)DEFAULT_SHMEM_SIZE);
+      char vbuf[16];
+      snprintf(vbuf, sizeof(vbuf), "%u", afl->cmplog_fsrv.map_size);
+      setenv("AFL_MAP_SIZE", vbuf, 1);
+
+    }
+
+    u32 new_map_size =
+        afl_fsrv_get_mapsize(&afl->cmplog_fsrv, afl->argv, &afl->stop_soon,
+                             afl->afl_env.afl_debug_child);
+
+    // only reinitialize when it needs to be larger
+    if (map_size < new_map_size) {
+
+      OKF("Re-initializing maps to %u bytes due cmplog", new_map_size);
+
+      afl->virgin_bits = ck_realloc(afl->virgin_bits, new_map_size);
+      afl->virgin_tmout = ck_realloc(afl->virgin_tmout, new_map_size);
+      afl->virgin_crash = ck_realloc(afl->virgin_crash, new_map_size);
+      afl->var_bytes = ck_realloc(afl->var_bytes, new_map_size);
+      afl->top_rated =
+          ck_realloc(afl->top_rated, new_map_size * sizeof(void *));
+      afl->clean_trace = ck_realloc(afl->clean_trace, new_map_size);
+      afl->clean_trace_custom =
+          ck_realloc(afl->clean_trace_custom, new_map_size);
+      afl->first_trace = ck_realloc(afl->first_trace, new_map_size);
+      afl->map_tmp_buf = ck_realloc(afl->map_tmp_buf, new_map_size);
+
+      afl->virgin_capability = ck_realloc(afl->virgin_capability,
+                                          MAX_CAPABILITY_NUM * sizeof(u32));
+
+      afl->virgin_position = ck_realloc(afl->virgin_position,
+                                        MAX_POSITION_NUM * sizeof(u32));
+
+      /* Add by wei at 31/5/2023 */
+      afl->related_bits = ck_realloc(afl->related_bits, sizeof(u32) * TARGET_MAP); // 专门收集与漏洞相关的代码块执行覆盖率，和普通路径覆盖率隔离，实现定向fuzz
+      afl->related_crash = ck_realloc(afl->related_crash, sizeof(u32) * TARGET_MAP); // 专门收集与漏洞相关的代码块导致的崩溃信息，和普通崩溃信息隔离，实现定向fuzz
+      /* Add End */
+
+      afl_fsrv_kill(&afl->fsrv);
+      afl_fsrv_kill(&afl->cmplog_fsrv);
+      afl_shm_deinit(&afl->shm);
+
+      afl->cmplog_fsrv.map_size = new_map_size;  // non-cmplog stays the same
+      map_size = new_map_size;
+
+      setenv("AFL_NO_AUTODICT", "1", 1);  // loaded already
+      afl->fsrv.trace_bits =
+          afl_shm_init(&afl->shm, new_map_size, afl->non_instrumented_mode);
+      
+      /* Add by wei at 26/5/2023 */
+      afl->fsrv.target_bits = afl->shm.target_map; //专门收集目标漏洞代码块执行覆盖率，和普通路径覆盖率隔离，实现定向fuzz
+      /* Add End */
+
+      afl->cmplog_fsrv.trace_bits = afl->fsrv.trace_bits;
+      afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
+                     afl->afl_env.afl_debug_child);
+      afl_fsrv_start(&afl->cmplog_fsrv, afl->argv, &afl->stop_soon,
+                     afl->afl_env.afl_debug_child);
+
+    }
+
+    OKF("Cmplog forkserver successfully started");
+
+  }
+
+  load_auto(afl);
+
+  if (extras_dir_cnt) { // 作用：加载额外的测试用例目录，即在 fuzzing 过程中加载用户指定的额外测试用例目录，以便在 fuzzing
+                         // 过程中能够根据用户指定的额外测试用例目录控制 fuzzing
+                         // 的行为和效率，促进 fuzzing 的效果提升
+
+    for (u8 i = 0; i < extras_dir_cnt; i++) {
+
+      load_extras(afl, extras_dir[i]);
+
+    }
+
+  }
+
+  deunicode_extras(afl);
+  dedup_extras(afl);
+  if (afl->extras_cnt) { OKF("Loaded a total of %u extras.", afl->extras_cnt); }
+
+  // after we have the correct bitmap size we can read the bitmap -B option
+  // and set the virgin maps
+  if (afl->in_bitmap) {  // 作用：读取输入位图，即在 fuzzing 过程中读取用户指定的输入位图，以便在 fuzzing
+                            // 过程中能够根据用户指定的输入位图控制 fuzzing 的行为和效率，促进 fuzzing 的效果提升
+
+    read_bitmap(afl->in_bitmap, afl->virgin_bits, afl->fsrv.map_size);
+
+  } else {
+
+    memset(afl->virgin_bits, 255, map_size);
+
+  }
+
+  memset(afl->virgin_tmout, 255, map_size);
+  memset(afl->virgin_crash, 255, map_size);
+
+  /* Add by wei at 31/5/2023 */
+  memset(afl->related_bits, 0xFFFFFFFF, TARGET_MAP);
+  memset(afl->related_crash, 0xFFFFFFFF, TARGET_MAP);
+
+  first_dry_run = 1;
+  perform_dry_run(afl);
+  first_dry_run = 0;
+
+  if (afl->q_testcase_max_cache_entries) {
+
+    afl->q_testcase_cache =
+        ck_alloc(afl->q_testcase_max_cache_entries * sizeof(size_t));
+    if (!afl->q_testcase_cache) { PFATAL("malloc failed for cache entries"); }
+
+  }
+
+  cull_queue(afl);
+
+  // ensure we have at least one seed that is not disabled.
+  u32 entry, valid_seeds = 0;
+  for (entry = 0; entry < afl->queued_paths; ++entry)
+    if (!afl->queue_buf[entry]->disabled) { ++valid_seeds; }
+
+  if (!afl->pending_not_fuzzed || !valid_seeds) {
+
+    FATAL("We need at least one valid input seed that does not crash!");
+
+  }
+
+  if (afl->timeout_given == 2) {  // -t ...+ option
+
+    if (valid_seeds == 1) {
+
+      WARNF(
+          "Only one valid seed is present, auto-calculating the timeout is "
+          "disabled!");
+      afl->timeout_given = 1;
+
+    } else {
+
+      u64 max_ms = 0;
+
+      for (entry = 0; entry < afl->queued_paths; ++entry)
+        if (!afl->queue_buf[entry]->disabled)
+          if (afl->queue_buf[entry]->exec_us > max_ms)
+            max_ms = afl->queue_buf[entry]->exec_us;
+
+      afl->fsrv.exec_tmout = max_ms;
+
+    }
+
+  }
+
+  show_init_stats(afl);
+
+  if (unlikely(afl->old_seed_selection)) seek_to = find_start_position(afl);
+
+  afl->start_time = get_cur_time();
+  if (afl->in_place_resume || afl->afl_env.afl_autoresume) {
+
+    load_stats_file(afl);
+
+  }
+
+  write_stats_file(afl, 0, 0, 0, 0);
+  maybe_update_plot_file(afl, 0, 0, 0);
+  save_auto(afl);
+
+  if (afl->stop_soon) { goto stop_fuzzing; }
+
+  /* Woop woop woop */
+
+  if (!afl->not_on_tty) {
+
+    sleep(1);
+    if (afl->stop_soon) { goto stop_fuzzing; }
+
+  }
+
+  // (void)nice(-20);  // does not improve the speed
+  // real start time, we reset, so this works correctly with -V
+  afl->start_time = get_cur_time();
+
+  u32 runs_in_current_cycle = (u32)-1;
+  u32 prev_queued_paths = 0;
+  u8  skipped_fuzz;
+
+  #ifdef INTROSPECTION
+  char ifn[4096];
+  snprintf(ifn, sizeof(ifn), "%s/introspection.txt", afl->out_dir);
+  if ((afl->introspection_file = fopen(ifn, "w")) == NULL) {
+
+    PFATAL("could not create '%s'", ifn);
+
+  }
+
+  setvbuf(afl->introspection_file, NULL, _IONBF, 0);
+  OKF("Writing mutation introspection to '%s'", ifn);
+  #endif
+
+
+  //主循环
+  while (
+      likely(!afl->stop_soon)) {  // 作用：主 fuzzing 循环，即在 fuzzing
+                                  // 过程中执行主 fuzzing 循环，以便在 fuzzing
+                                  // 过程中不断地生成新的测试用例并执行它们，促进
+                                  // fuzzing 的效果提升
+
+    cull_queue(afl); // 作用：清理队列，即在 fuzzing 过程中清理测试用例队列，以便在 fuzzing
+                      // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing 的效果提升
+
+    if (unlikely((!afl->old_seed_selection &&
+                  runs_in_current_cycle > afl->queued_paths) ||
+                 (afl->old_seed_selection && !afl->queue_cur))) { // 作用：进入新的队列周期，即在 fuzzing
+                                                        // 过程中进入新的测试用例队列周期，以便在 fuzzing
+      // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing
+      // 的效果提升
+
+      if (unlikely((afl->last_sync_cycle < afl->queue_cycle ||
+                    (!afl->queue_cycle && afl->afl_env.afl_import_first)) &&
+                   afl->sync_id)) { // 作用：同步 fuzzers，即在 fuzzing 过程中同步不同实例之间的 fuzzers，以便在 fuzzing
+                                                                                  // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing 的效果提升
+
+        sync_fuzzers(afl); // 作用：同步 fuzzers，即在 fuzzing 过程中同步不同实例之间的 fuzzers，以便在 fuzzing 过程中能够根据用户指定的配置控制
+                   // fuzzing 的行为和效率，促进 fuzzing 的效果提升
+
+      }
+
+      ++afl->queue_cycle; // 作用：增加队列周期计数，即在 fuzzing 过程中增加测试用例队列周期的计数，以便在 fuzzing
+                           // 过程中能够根据用户指定的配置控制 fuzzing
+                           // 的行为和效率，促进 fuzzing 的效果提升
+      runs_in_current_cycle = (u32)-1; // 作用：重置当前周期运行计数，即在 fuzzing 过程中重置当前测试用例队列周期的运行计数，以便在 fuzzing
+                    // 过程中能够根据用户指定的配置控制 fuzzing
+                    // 的行为和效率，促进 fuzzing 的效果提升
+      afl->cur_skipped_paths = 0;
+
+      if (unlikely(afl->old_seed_selection)) { // 作用：旧的种子选择，即在 fuzzing 过程中使用旧的种子选择方法，以便在 fuzzing
+                                           // 过程中能够根据用户指定的配置控制
+                                           // fuzzing 的行为和效率，促进 fuzzing
+                                           // 的效果提升
+
+        afl->current_entry = 0;
+        while (unlikely(afl->current_entry < afl->queued_paths &&
+                        afl->queue_buf[afl->current_entry]->disabled)) { // 作用：跳过禁用的测试用例，即在 fuzzing 过程中跳过被禁用的测试用例，以便在 fuzzing
+          // 过程中能够根据用户指定的配置控制 fuzzing 的行为和效率，促进 fuzzing
+          // 的效果提升
+
+          ++afl->current_entry;
+
+        }
+
+        if (afl->current_entry >= afl->queued_paths) { afl->current_entry = 0; } 
+
+        afl->queue_cur = afl->queue_buf[afl->current_entry];
+
+        if (unlikely(seek_to)) {
+
+          if (unlikely(seek_to >= afl->queued_paths)) {
+
+            // This should never happen.
+            FATAL("BUG: seek_to location out of bounds!\n");
+
+          }
+
+          afl->current_entry = seek_to;
+          afl->queue_cur = afl->queue_buf[seek_to];
+          seek_to = 0;
+
+        }
+
+      }
+
+      if (unlikely(afl->not_on_tty)) {
+
+        ACTF("Entering queue cycle %llu.", afl->queue_cycle);
+        fflush(stdout);
+
+      }
+
+      /* If we had a full queue cycle with no new finds, try
+         recombination strategies next. */
+
+      if (unlikely(afl->queued_paths == prev_queued
+                   /* FIXME TODO BUG: && (get_cur_time() - afl->start_time) >=
+                      3600 */
+                   )) {
+
+        if (afl->use_splicing) {
+
+          ++afl->cycles_wo_finds;
+
+          if (unlikely(afl->shm.cmplog_mode &&
+                       afl->cmplog_max_filesize < MAX_FILE)) {
+
+            afl->cmplog_max_filesize <<= 4;
+
+          }
+
+          switch (afl->expand_havoc) {
+
+            case 0:
+              // this adds extra splicing mutation options to havoc mode
+              afl->expand_havoc = 1;
+              break;
+            case 1:
+              // add MOpt mutator
+              /*
+              if (afl->limit_time_sig == 0 && !afl->custom_only &&
+                  !afl->python_only) {
+
+                afl->limit_time_sig = -1;
+                afl->limit_time_puppet = 0;
+
+              }
+
+              */
+              afl->expand_havoc = 2;
+              if (afl->cmplog_lvl && afl->cmplog_lvl < 2) afl->cmplog_lvl = 2;
+              break;
+            case 2:
+              // increase havoc mutations per fuzz attempt
+              afl->havoc_stack_pow2++;
+              afl->expand_havoc = 3;
+              break;
+            case 3:
+              // further increase havoc mutations per fuzz attempt
+              afl->havoc_stack_pow2++;
+              afl->expand_havoc = 4;
+              break;
+            case 4:
+              afl->expand_havoc = 5;
+              // if (afl->cmplog_lvl && afl->cmplog_lvl < 3) afl->cmplog_lvl =
+              // 3;
+              break;
+            case 5:
+              // nothing else currently
+              break;
+
+          }
+
+        } else {
+
+  #ifndef NO_SPLICING
+          afl->use_splicing = 1;
+  #else
+          afl->use_splicing = 0;
+  #endif
+
+        }
+
+      } else {
+
+        afl->cycles_wo_finds = 0;
+
+      }
+
+  #ifdef INTROSPECTION
+      fprintf(afl->introspection_file,
+              "CYCLE cycle=%llu cycle_wo_finds=%llu expand_havoc=%u queue=%u\n",
+              afl->queue_cycle, afl->cycles_wo_finds, afl->expand_havoc,
+              afl->queued_paths);
+  #endif
+
+      if (afl->cycle_schedules) {
+
+        /* we cannot mix non-AFLfast schedules with others */
+
+        switch (afl->schedule) {
+
+          case EXPLORE:
+            afl->schedule = EXPLOIT;
+            break;
+          case EXPLOIT:
+            afl->schedule = MMOPT;
+            break;
+          case MMOPT:
+            afl->schedule = SEEK;
+            break;
+          case SEEK:
+            afl->schedule = EXPLORE;
+            break;
+          case FAST:
+            afl->schedule = COE;
+            break;
+          case COE:
+            afl->schedule = LIN;
+            break;
+          case LIN:
+            afl->schedule = QUAD;
+            break;
+          case QUAD:
+            afl->schedule = RARE;
+            break;
+          case RARE:
+            afl->schedule = FAST;
+            break;
+
+        }
+
+        // we must recalculate the scores of all queue entries
+        for (u32 i = 0; i < afl->queued_paths; i++) {
+
+          if (likely(!afl->queue_buf[i]->disabled)) {
+
+            update_bitmap_score(afl, afl->queue_buf[i]);
+
+          }
+
+        }
+
+      }
+
+      prev_queued = afl->queued_paths;
+
+    }
+
+    ++runs_in_current_cycle;
+
+    do {
+
+      if (likely(!afl->old_seed_selection)) {
+
+        if (unlikely(prev_queued_paths < afl->queued_paths ||
+                     afl->reinit_table)) {
+
+          // we have new queue entries since the last run, recreate alias table
+          prev_queued_paths = afl->queued_paths;
+          create_alias_table(afl);
+
+        }
+
+        afl->current_entry = select_next_queue_entry(afl);
+        afl->queue_cur = afl->queue_buf[afl->current_entry];
+
+      }
+
+      skipped_fuzz = fuzz_one(afl);  // 作用：执行一次 fuzzing，即在 fuzzing 过程中执行一次 fuzzing，以便在 fuzzing
+                                     // 过程中不断地生成新的测试用例并执行它们，促进
+                                     // fuzzing 的效果提升
+
+      if (unlikely(!afl->stop_soon && exit_1)) { afl->stop_soon = 2; }
+
+      if (unlikely(afl->old_seed_selection)) {
+
+        while (++afl->current_entry < afl->queued_paths &&
+               afl->queue_buf[afl->current_entry]->disabled)
+          ;
+        if (unlikely(afl->current_entry >= afl->queued_paths ||
+                     afl->queue_buf[afl->current_entry] == NULL ||
+                     afl->queue_buf[afl->current_entry]->disabled))
+          afl->queue_cur = NULL;
+        else
+          afl->queue_cur = afl->queue_buf[afl->current_entry];
+
+      }
+
+    } while (skipped_fuzz && afl->queue_cur && !afl->stop_soon);
+
+    if (likely(!afl->stop_soon && afl->sync_id)) {
+
+      if (likely(afl->skip_deterministic)) {
+
+        if (unlikely(afl->is_main_node)) {
+
+          if (unlikely(get_cur_time() >
+                       (SYNC_TIME >> 1) + afl->last_sync_time)) {
+
+            if (!(sync_interval_cnt++ % (SYNC_INTERVAL / 3))) {
+
+              sync_fuzzers(afl);
+
+            }
+
+          }
+
+        } else {
+
+          if (unlikely(get_cur_time() > SYNC_TIME + afl->last_sync_time)) {
+
+            if (!(sync_interval_cnt++ % SYNC_INTERVAL)) { sync_fuzzers(afl); }
+
+          }
+
+        }
+
+      } else {
+
+        sync_fuzzers(afl);
+
+      }
+
+    }
+
+  }
+
+  write_bitmap(afl);
+  save_auto(afl);
+
+stop_fuzzing:
+
+  afl->force_ui_update = 1;  // ensure the screen is reprinted
+  show_stats(afl);           // print the screen one last time
+
+  SAYF(CURSOR_SHOW cLRD "\n\n+++ Testing aborted %s +++\n" cRST,
+       afl->stop_soon == 2 ? "programmatically" : "by user");
+
+  if (afl->most_time_key == 2) {
+
+    SAYF(cYEL "[!] " cRST "Time limit was reached\n");
+
+  }
+
+  if (afl->most_execs_key == 2) {
+
+    SAYF(cYEL "[!] " cRST "Execution limit was reached\n");
+
+  }
+
+  /* Running for more than 30 minutes but still doing first cycle? */
+
+  if (afl->queue_cycle == 1 &&
+      get_cur_time() - afl->start_time > 30 * 60 * 1000) {
+
+    SAYF("\n" cYEL "[!] " cRST
+         "Stopped during the first cycle, results may be incomplete.\n"
+         "    (For info on resuming, see %s/README.md)\n",
+         doc_path);
+
+  }
+
+  #ifdef PROFILING
+  SAYF(cYEL "[!] " cRST
+            "Profiling information: %llu ms total work, %llu ns/run\n",
+       time_spent_working / 1000000,
+       time_spent_working / afl->fsrv.total_execs);
+  #endif
+
+  if (afl->is_main_node) {
+
+    u8 path[PATH_MAX];
+    sprintf(path, "%s/is_main_node", afl->out_dir);
+    unlink(path);
+
+  }
+
+  if (frida_afl_preload) { ck_free(frida_afl_preload); }
+
+  fclose(afl->fsrv.plot_file);
+  destroy_queue(afl);
+  destroy_extras(afl);
+  destroy_custom_mutators(afl);
+  afl_shm_deinit(&afl->shm);
+
+  if (afl->shm_fuzz) {
+
+    afl_shm_deinit(afl->shm_fuzz);
+    ck_free(afl->shm_fuzz);
+
+  }
+
+  afl_fsrv_deinit(&afl->fsrv);
+
+  /* remove tmpfile */
+  if (afl->tmp_dir != NULL && !afl->in_place_resume && afl->fsrv.out_file) {
+
+    (void)unlink(afl->fsrv.out_file);
+
+  }
+
+  if (afl->orig_cmdline) { ck_free(afl->orig_cmdline); }
+  ck_free(afl->fsrv.target_path);
+  ck_free(afl->fsrv.out_file);
+  ck_free(afl->sync_id);
+
+  capability_state_destroy(afl);
+
+  if (afl->q_testcase_cache) { ck_free(afl->q_testcase_cache); }
+  afl_state_deinit(afl);
+  free(afl);                                                 /* not tracked */
+
+  argv_cpy_free(argv);
+
+  alloc_report();
+
+  OKF("We're done here. Have a nice day!\n");
+
+  exit(0);
+
+}
+
+#endif                                                          /* !AFL_LIB */
+
