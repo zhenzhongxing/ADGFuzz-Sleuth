@@ -79,7 +79,7 @@ if [ ! -d "$SLEUTH_PATH/ddgAnalysis/z3/build" ]; then
     cmake .. \
         -DCMAKE_INSTALL_PREFIX=$(realpath ../install) \
         -DZ3_BUILD_LIBZ3_SHARED=False
-    make -j$(nproc)
+    make -j2
     make install
     echo "[+] z3 built successfully"
 fi
@@ -93,7 +93,7 @@ if [ ! -d "$SLEUTH_PATH/ddgAnalysis/build" ]; then
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
         -DLLVM_DIR=$(llvm-config --cmakedir) \
         -DZ3_DIR="$SLEUTH_PATH/ddgAnalysis/z3/install"
-    make -j$(nproc)
+    make -j2
     echo "[+] DDGAnalysis built successfully"
 fi
 
