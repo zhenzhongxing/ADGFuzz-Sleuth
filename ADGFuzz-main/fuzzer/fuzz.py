@@ -478,17 +478,19 @@ class ADGfuzzer:
             self.rvstatus_thread.join()
         if self.msgprocess_thread and self.msgprocess_thread.is_alive():
             self.msgprocess_thread.join()
-        try:
-
-            os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-            # os.system("fuser -k 5760/tcp")
-            # os.system("lsof -t -i :5760 | xargs -r kill -9")
-            logging.info("Terminated the sim_vehicle.py processes")
-        except Exception as e:
-            print(f"Failed to terminate sim_vehicle.py processes: {e}")
+        # Force kill all SITL processes
+        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+        time.sleep(2)
+        # Wait for port 5760 to be released
+        for _ in range(30):
+            if os.system('ss -tln | grep -q 5760') != 0:
+                break
+            time.sleep(1)
+        logging.info("Old SITL terminated, port 5760 released")
         self.bug_oracle.reset_all()
-        time.sleep(1) #maybe 0
-        type = self.rvtype  # default
+        type = self.rvtype
         if type == 'copter':
             type = 'ArduCopter'
         elif type == 'plane':
@@ -499,13 +501,16 @@ class ADGfuzzer:
         ARDUPILOT_HOME = os.getenv("ARDUPILOT_HOME")
         if ARDUPILOT_HOME is None:
             ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
+        ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
         import subprocess as _sub
         env = os.environ.copy()
         _lb = os.path.expanduser('~/.local/bin')
         env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
         sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-        c = 'xterm -e \'' + sim_script + ' -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\''
+        c = ('xterm -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
+             + sim_script + ' -v ' + type
+             + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
         sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
@@ -791,15 +796,16 @@ class ADGfuzzer:
 
         def reboot_nothread():
             logging.info("================ Restarting SITL ================")
-            try:
-                # os.system("pkill -f 'sim_vehicle.py'")
-                os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-                logging.info("Terminated the sim_vehicle.py processes")
-            except Exception as e:
-                print(f"Failed to terminate sim_vehicle.py processes: {e}")
-
-            time.sleep(1)  # maybe 0
-            type = self.rvtype  # default
+            os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+            os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+            os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+            time.sleep(2)
+            for _ in range(30):
+                if os.system('ss -tln | grep -q 5760') != 0:
+                    break
+                time.sleep(1)
+            logging.info("Old SITL terminated, port 5760 released")
+            type = self.rvtype
             if type == 'copter':
                 type = 'ArduCopter'
             elif type == 'plane':
@@ -808,13 +814,16 @@ class ADGfuzzer:
             ARDUPILOT_HOME = os.getenv("ARDUPILOT_HOME")
             if ARDUPILOT_HOME is None:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
+            ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
             import subprocess as _sub
             env = os.environ.copy()
             _lb = os.path.expanduser('~/.local/bin')
             env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
             sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-            c = 'xterm -e \'' + sim_script + ' -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\''
+            c = ('xterm -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
+                 + sim_script + ' -v ' + type
+                 + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
             sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
