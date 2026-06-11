@@ -57,15 +57,6 @@ def main():
     PARAM = param
 
     INITPOC = os.path.join(INFO, 'poc')
-    # INITPOC must be a file, not a directory — use first seed file as fallback
-    if os.path.isdir(INITPOC):
-        poc_files = [f for f in os.listdir(INITPOC) if os.path.isfile(os.path.join(INITPOC, f))]
-        if poc_files:
-            INITPOC = os.path.join(INITPOC, poc_files[0])
-        else:
-            # fallback: use first seed from INFILE
-            seed_files = [f for f in os.listdir(INFILE) if os.path.isfile(os.path.join(INFILE, f))]
-            INITPOC = os.path.join(INFILE, seed_files[0]) if seed_files else INITPOC
     SRC = os.path.join(PROJECT, f'fuzz_{VULN}')
     COMPSRC = os.path.join(PROJECT, f'comp_fuzz_{VULN}')
     EVOSRC = os.path.join(PROJECT, f'evo_fuzz_{VULN}')
@@ -75,6 +66,15 @@ def main():
     COMPOUTFILE = os.path.join(COMPSRC, 'out_')
     SEEDINFILE = os.path.join(INFO, 'evo_crash/seeds')
     EVOOUTFILE = os.path.join(EVOSRC, 'out_')
+
+    # INITPOC must be a file, not a directory
+    if os.path.isdir(INITPOC):
+        poc_files = [f for f in os.listdir(INITPOC) if os.path.isfile(os.path.join(INITPOC, f))]
+        if poc_files:
+            INITPOC = os.path.join(INITPOC, poc_files[0])
+        else:
+            seed_files = [f for f in os.listdir(INFILE) if os.path.isfile(os.path.join(INFILE, f))]
+            INITPOC = os.path.join(INFILE, seed_files[0]) if seed_files else INITPOC
 
     EXE = None
     COMPEXE = None
