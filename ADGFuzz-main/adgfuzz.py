@@ -47,25 +47,39 @@ def ardupilot_init(arg):
     env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
     sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-    c = ('xterm -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
-         + sim_script + ' -v ' + type
-         + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
+    sim_args = [sim_script, '-v', type, '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
 
-    gterm_log = open('/tmp/xterm_stderr.log', 'w')
-    sim = Popen(c, stdin=subprocess.DEVNULL, stderr=gterm_log, stdout=gterm_log, shell=True, env=env)
-    print(f"Simulator started with xterm (PID: {sim.pid})")
-    #sim = Popen(c, shell=True)
-    #stdout, stderr = sim.communicate()  # Capture stdout and stderr
-    # if bug_occured:
-    #     os.killpg(os.getpgid(sim.pid), sim.SIGTERM) #replaced by terminate_ardupilot()
+    # Detect terminal: gnome-terminal (GUI) > direct run (headless)
+    term = None
+    if os.environ.get('DISPLAY'):
+        for t in ['gnome-terminal', 'xterm']:
+            if os.system(f'which {t} >/dev/null 2>&1') == 0:
+                term = t
+                break
+
+    if term == 'gnome-terminal':
+        sim_args = ['--', 'python3'] + sim_args
+        sim = Popen([term] + sim_args, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+    elif term == 'xterm':
+        sim_args = ['-e', 'python3'] + sim_args
+        sim = Popen([term] + sim_args, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+    else:
+        # Headless: run sim_vehicle.py in background via setsid
+        sim_cmd = 'setsid python3 ' + ' '.join(sim_args[2:])
+        sim = Popen(['python3'] + sim_args, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+    print(f"SITL started (PID: {sim.pid})")
 
 def terminate_ardupilot():
     try:
-        #os.system("pkill -f 'sim_vehicle.py'")
-        os.system("pkill -SIGINT -f 'sim_vehicle.py'")
-        print("Terminated the sim_vehicle.py processes")
+        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+        print("Terminated SITL processes")
     except Exception as e:
-        print(f"Failed to terminate sim_vehicle.py processes: {e}")
+        print(f"Failed to terminate processes: {e}")
     logging.info('============ Fuzzing End ============')
 
 def px4_init(arg):
@@ -290,14 +304,12 @@ def main():
     time.sleep(50)
     logging.info("Begin Fuzzing")
 
-    print("[DBG] constructing fuzzer...", flush=True)
     if rvtype == 'px4':
         adgfuzz = PX4fuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
     else:
         adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
-    print("[DBG] entering run()...", flush=True)
     adgfuzz.run()
     adgfuzz.print_final_status()
 

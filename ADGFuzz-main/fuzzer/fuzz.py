@@ -94,12 +94,8 @@ class ADGfuzzer:
 
         self.bug_inputs = set()
         #RV
-        print("[DBG] connecting port 14550...", flush=True)
         self.master = self.connect_init()
-        print("[DBG] port 14550 OK", flush=True)
-        print("[DBG] connecting port 14551...", flush=True)
         self.oracle_master = self.Oconn_init()
-        print("[DBG] port 14551 OK", flush=True)
         self.rvtype = rvtype
         self.total_round = 0
 
@@ -520,10 +516,18 @@ class ADGfuzzer:
         _lb = os.path.expanduser('~/.local/bin')
         env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
         sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-        c = ('xterm -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
-             + sim_script + ' -v ' + type
-             + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
-        sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
+        sim_args = [sim_script, '-v', type, '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+        term = None
+        if os.environ.get('DISPLAY'):
+            for t in ['gnome-terminal', 'xterm']:
+                if os.system(f'which {t} >/dev/null 2>&1') == 0:
+                    term = t; break
+        if term == 'gnome-terminal':
+            sim = Popen([term, '--', 'python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
+        elif term == 'xterm':
+            sim = Popen([term, '-e', 'python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
+        else:
+            sim = Popen(['python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -840,10 +844,18 @@ class ADGfuzzer:
             _lb = os.path.expanduser('~/.local/bin')
             env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
             sim_script = os.path.join(ARDUPILOT_HOME, 'Tools/autotest/sim_vehicle.py')
-            c = ('xterm -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
-                 + sim_script + ' -v ' + type
-                 + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
-            sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
+            sim_args = [sim_script, '-v', type, '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
+            term = None
+            if os.environ.get('DISPLAY'):
+                for t in ['gnome-terminal', 'xterm']:
+                    if os.system(f'which {t} >/dev/null 2>&1') == 0:
+                        term = t; break
+            if term == 'gnome-terminal':
+                sim = Popen([term, '--', 'python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
+            elif term == 'xterm':
+                sim = Popen([term, '-e', 'python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
+            else:
+                sim = Popen(['python3'] + sim_args, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()
