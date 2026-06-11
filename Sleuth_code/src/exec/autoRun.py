@@ -45,8 +45,8 @@ def main():
         print(f"{VULN} not found in {TABLE}")
         sys.exit(0)
 
-    PROJECT = _path + project_path
-    INFO = _path + info_path
+    PROJECT = project_path if os.path.isabs(project_path) else os.path.join(_path, project_path)
+    INFO = info_path if os.path.isabs(info_path) else os.path.join(_path, info_path)
     PARAM = param
 
     INITPOC = os.path.join(INFO, 'poc')
