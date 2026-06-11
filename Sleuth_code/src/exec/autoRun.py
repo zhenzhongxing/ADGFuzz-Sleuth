@@ -45,8 +45,15 @@ def main():
         print(f"{VULN} not found in {TABLE}")
         sys.exit(0)
 
-    PROJECT = project_path if os.path.isabs(project_path) else os.path.join(_path, project_path)
-    INFO = info_path if os.path.isabs(info_path) else os.path.join(_path, info_path)
+    # Resolve VulnTable paths: absolute paths used as-is, relative-with-leading-/ joined to SLEUTH_PATH
+    def _resolve(base, p):
+        if not p.startswith('/'):
+            return os.path.join(base, p)
+        if os.path.exists(p):
+            return p
+        return os.path.join(base, p.lstrip('/'))
+    PROJECT = _resolve(_path, project_path)
+    INFO = _resolve(_path, info_path)
     PARAM = param
 
     INITPOC = os.path.join(INFO, 'poc')
