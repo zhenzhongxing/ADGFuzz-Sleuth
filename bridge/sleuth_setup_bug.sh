@@ -144,7 +144,7 @@ sed -i "s/BUG_ID_PLACEHOLDER/$BUG_ID/g" "$FULL_HARNESS"
 sed -i "s|ARDUPILOT_PLACEHOLDER|$ARDUPILOT_SRC|g" "$FULL_HARNESS"
 
 # 追加实际 harness 内容（跳过 include 和 main 声明部分）
-tail -n +13 "$HARNESS_FILE" | head -n -1 >> "$FULL_HARNESS"
+tail -n +13 "$HARNESS_FILE" >> "$FULL_HARNESS"
 
 echo "[+] Full harness written: $FULL_HARNESS"
 
