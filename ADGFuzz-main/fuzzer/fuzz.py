@@ -484,7 +484,12 @@ class ADGfuzzer:
         os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
         time.sleep(2)
         # Clean up SITL persistent state (bad params from fuzzing cause instant crash on restart)
-        os.system("rm -f eeprom.bin mav.parm 2>/dev/null")
+        ARDUPILOT_HOME = os.getenv("ARDUPILOT_HOME")
+        if ARDUPILOT_HOME is None:
+            ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
+        ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
+        os.system(f"rm -f {ARDUPILOT_HOME}/eeprom.bin 2>/dev/null")
+        os.system("rm -f mav.parm eeprom.bin 2>/dev/null")
         os.system("rm -f /tmp/ArduCopter* 2>/dev/null")
         os.system("ipcrm -a 2>/dev/null")
         # Wait for port 5760 to be released
@@ -804,6 +809,8 @@ class ADGfuzzer:
             os.system("pkill -9 -f 'arducopter' 2>/dev/null")
             os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
             time.sleep(2)
+            _ardu_home = os.path.expanduser(os.getenv("ARDUPILOT_HOME", "~/code/t2-ArduPilot/"))
+            os.system(f"rm -f {_ardu_home}/eeprom.bin 2>/dev/null")
             os.system("rm -f eeprom.bin mav.parm 2>/dev/null")
             os.system("rm -f /tmp/ArduCopter* 2>/dev/null")
             os.system("ipcrm -a 2>/dev/null")
