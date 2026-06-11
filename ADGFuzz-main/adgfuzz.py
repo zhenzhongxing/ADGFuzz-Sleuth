@@ -46,7 +46,9 @@ def ardupilot_init(arg):
     local_bin = os.path.expanduser('~/.local/bin')
     env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
-    c = 'xterm -e \'' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\''
+    c = ('xterm -hold -e bash -c \'export PATH=$HOME/.local/bin:$PATH; '
+         + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type
+         + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551\'')
 
     gterm_log = open('/tmp/xterm_stderr.log', 'w')
     sim = Popen(c, stdin=subprocess.DEVNULL, stderr=gterm_log, stdout=gterm_log, shell=True, env=env)
