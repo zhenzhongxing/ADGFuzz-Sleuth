@@ -181,7 +181,7 @@ fi
 
 # Step 4d: Build instrumented binary for Sleuth
 echo "[+] Building instrumented binary..."
-DDG_INSTR=1 AFL_LLVM_INSTRUMENT=classic clang -g -O0 \
+"$SLEUTH_PATH/Sleuth/afl-clang-fast" -g -O0 \
     -I "$ARDUPILOT_SRC/libraries" \
     -o "fuzz_bug${BUG_ID}_cov" \
     "$FULL_HARNESS" -lm 2>&1 | tee "$BUG_DIR/logs/build_instr.log" || {
