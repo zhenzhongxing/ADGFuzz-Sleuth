@@ -495,9 +495,12 @@ class ADGfuzzer:
         if ARDUPILOT_HOME is None:
             ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
 
-        c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
-        #c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
-        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+        import subprocess as _sub
+        env = os.environ.copy()
+        _lb = os.path.expanduser('~/.local/bin')
+        env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
+        c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
+        sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
         logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
         time.sleep(60)
 
@@ -800,8 +803,12 @@ class ADGfuzzer:
             if ARDUPILOT_HOME is None:
                 ARDUPILOT_HOME = '~/code/t2-ArduPilot/'
 
-            c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
-            sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+            import subprocess as _sub
+            env = os.environ.copy()
+            _lb = os.path.expanduser('~/.local/bin')
+            env['PATH'] = _lb + os.pathsep + env.get('PATH', '')
+            c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
+            sim = Popen(c, stdin=_sub.DEVNULL, stderr=_sub.DEVNULL, stdout=_sub.DEVNULL, shell=True, env=env)
             logging.info("Wait for 60 seconds to ensure that the Drone(Ardupilot) initialization is complete")
             time.sleep(60)
             self.master = self.connect_init()

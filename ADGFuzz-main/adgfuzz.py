@@ -40,10 +40,15 @@ def ardupilot_init(arg):
         raise Exception("ARDUPILOT_HOME environment variable is not set!")
     ARDUPILOT_HOME = os.path.expanduser(ARDUPILOT_HOME)
 
-    c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
-    #c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map -w'
+    # Build env with ~/.local/bin in PATH (where pip3 --user installs mavproxy)
+    import subprocess
+    env = os.environ.copy()
+    local_bin = os.path.expanduser('~/.local/bin')
+    env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
 
-    sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+    c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
+
+    sim = Popen(c, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, shell=True, env=env)
     print(f"Simulator started with gnome-terminal (PID: {sim.pid})")
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
