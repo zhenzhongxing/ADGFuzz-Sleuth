@@ -43,6 +43,26 @@
 extern u64 time_spent_working;
 #endif
 
+/* Sleuth-specific global variables (declared extern in afl-fuzz.h) */
+u8 *original_poc_buf;
+u32 original_poc_len;
+int *d_related_pos;
+int d_related_pos_num;
+u32 fuzzed_pos[MAX_POSITION_NUM];
+u32 fuzzed_pos_cnt;
+u32 fuzzed_switch_pos_cnt;
+u32 most_active_union;
+u8  start_exploitation;
+cap_union_t *all_union;
+u32 all_union_num;
+u8  new_union;
+unsigned int now_cap_hash;
+unsigned int now_pos_hash;
+u32 all_capability_num;
+u32 all_position_num;
+u8 first_dry_run;
+u32 all_switch_num;
+
 static void
 at_exit() {  // 作用：在程序退出时执行一些清理工作，比如关闭共享内存、杀死子进程等
 

@@ -162,31 +162,31 @@ typedef struct cap_union {
 
 } cap_union_t;
 
-u8 *original_poc_buf;                 /* The content of original PoC */
-u32 original_poc_len;                 /* length of original input PoC */
-int *d_related_pos;                   /* D related bytes positions */
-int d_related_pos_num;                /* how many D related bytes we have */
-u32 fuzzed_pos[MAX_POSITION_NUM];
-u32 fuzzed_pos_cnt;
-u32 fuzzed_switch_pos_cnt;
-u32 most_active_union;      /* recent LATEST_SEED_NUM new seed were found from it */
-u8  start_exploitation;     /* whether we should start exploitation (union focus mutation) */
-cap_union_t *all_union;         /* Unions find by exploration */
-u32 all_union_num;                    /* The number of unions found by exploration */
-u8  new_union;                        /* new union is detected? */
+extern u8 *original_poc_buf;                 /* The content of original PoC */
+extern u32 original_poc_len;                 /* length of original input PoC */
+extern int *d_related_pos;                   /* D related bytes positions */
+extern int d_related_pos_num;                /* how many D related bytes we have */
+extern u32 fuzzed_pos[MAX_POSITION_NUM];
+extern u32 fuzzed_pos_cnt;
+extern u32 fuzzed_switch_pos_cnt;
+extern u32 most_active_union;      /* recent LATEST_SEED_NUM new seed were found from it */
+extern u8  start_exploitation;     /* whether we should start exploitation (union focus mutation) */
+extern cap_union_t *all_union;         /* Unions find by exploration */
+extern u32 all_union_num;                    /* The number of unions found by exploration */
+extern u8  new_union;                        /* new union is detected? */
 //u8  new_cap;                   /* new capability is detected? */
-//u8  new_pos;                   /* new position is detected? */    
-unsigned int now_cap_hash;
-unsigned int now_pos_hash;
+//u8  new_pos;                   /* new position is detected? */
+extern unsigned int now_cap_hash;
+extern unsigned int now_pos_hash;
 
-u32 all_capability_num;               /* The number of capabilities we have seen */
-u32 all_position_num;                 /* The number of positions we have seen */
-u8 first_dry_run;
+extern u32 all_capability_num;               /* The number of capabilities we have seen */
+extern u32 all_position_num;                 /* The number of positions we have seen */
+extern u8 first_dry_run;
 
 //u8 start_depth_exploration;  /*whether we should start in-depth exploration*/
 //u8 start_breadth_exploration; /*whether we should start breadth exploration*/
 
-u32 all_switch_num;
+extern u32 all_switch_num;
 
 extern s8  interesting_8[INTERESTING_8_LEN];
 extern s16 interesting_16[INTERESTING_8_LEN + INTERESTING_16_LEN];
