@@ -75,7 +75,7 @@ if [ ! -d "$SLEUTH_PATH/ddgAnalysis/z3/build" ]; then
     if [ ! -d "z3" ]; then
         git clone https://github.com/z3prover/z3
     fi
-    git -C z3 checkout z3-4.8.8
+    git -C z3 checkout z3-4.8.8 2>/dev/null || { rm -rf z3; git clone https://github.com/z3prover/z3; git -C z3 checkout z3-4.8.8; }
     mkdir -p z3/build
     cd z3/build
     cmake .. \
