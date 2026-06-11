@@ -94,15 +94,20 @@ class ADGfuzzer:
 
         self.bug_inputs = set()
         #RV
+        print("[DBG] connecting port 14550...", flush=True)
         self.master = self.connect_init()
+        print("[DBG] port 14550 OK", flush=True)
+        print("[DBG] connecting port 14551...", flush=True)
         self.oracle_master = self.Oconn_init()
+        print("[DBG] port 14551 OK", flush=True)
         self.rvtype = rvtype
-        #self.total_entropy = 0
         self.total_round = 0
 
     def connect_init(self):
         master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
+        print("[DBG] wait_heartbeat 14550...", flush=True)
         master.wait_heartbeat()
+        print("[DBG] heartbeat 14550 OK", flush=True)
         #logging.info("received heartbeat, get Plane gps location")
         return master
 

@@ -286,12 +286,14 @@ def main():
     time.sleep(50)
     logging.info("Begin Fuzzing")
 
+    print("[DBG] constructing fuzzer...", flush=True)
     if rvtype == 'px4':
         adgfuzz = PX4fuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
     else:
         adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath, time_budget=runtime,
                              sleuth_export=args.sleuth_export)
+    print("[DBG] entering run()...", flush=True)
     adgfuzz.run()
     adgfuzz.print_final_status()
 
