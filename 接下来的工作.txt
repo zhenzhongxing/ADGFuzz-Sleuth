@@ -1,0 +1,334 @@
+============================================================
+  接下来的工作：为 Sleuth 集成真实的 ArduPilot 漏洞代码
+============================================================
+
+当前状态：
+  ADGFuzz → 发现 bug → Bridge 转换格式 → Sleuth 编译 harness ✅
+  但 harness 里没有真正的 ArduPilot 漏洞代码，Sleuth 在 fuzz 空壳 ❌
+
+目标：
+  让 harness 能复现 ADGFuzz 在 SITL 中触发的 bug，这样 Sleuth 才能
+  基于这个 bug 进行深度影响挖掘（找到新的 crash 类型、评估影响范围）。
+
+------------------------------------------------------------
+目录
+------------------------------------------------------------
+  第一部分：理解 bug 是怎么被触发的
+  第二部分：定位 ArduPilot 源码中的漏洞代码
+  第三部分：提取漏洞函数到 harness
+  第四部分：编译并验证 harness 能复现 crash
+  第五部分：运行 DDG 分析 + Sleuth fuzzing
+  第六部分：常见问题
+------------------------------------------------------------
+
+============================================================
+第一部分：理解 bug 是怎么被触发的
+============================================================
+
+1.1 查看 ADGFuzz 生成的 bug 文件
+
+  Bug 文件在 outfile/quicktest/ 目录下，格式如下：
+
+    init_path: ('height_amsl_cm', 'terrain_difference',
+                ['terrain_altitude'])
+    RVpath: [['paramset', 'AFS_AMSL_LIMIT', 1],
+             ['paramset', 'AFS_AMSL_ERR_GPS', 1],
+             ['mavcmd', 'MAV_CMD_DO_CHANGE_ALTITUDE'], ...]
+    paramset AFS_AMSL_LIMIT 0
+    paramset TERRAIN_SPACING 0
+    paramset SIM_PLD_HEIGHT 0
+    mavcmd MAV_CMD_DO_CHANGE_ALTITUDE [416, 1, 0, 0, 0, 0, 0]
+    ...
+
+  解读：
+  - init_path: ADG 分析出的漏洞函数和变量。这里说明漏洞跟高度/地形计算有关。
+  - RVpath: 触发漏洞需要的输入（参数名 + 命令名）。
+  - 下面是具体的参数值（ADGFuzz 通过 MAVLink 发送给 SITL 的）。
+
+1.2 理解 ADGFuzz 的 bug 类型
+
+  ADGFuzz 检测三种 bug：
+  - ArithmException（算数异常）：SITL 进程无响应，MAVLink 心跳丢失。
+    对应 ArduPilot 内部发生了崩溃（浮点异常、除零等）。
+  - WpDeviation（路径偏离）：无人机偏离预设航点太远。
+  - StatusError/HitGround（坠地）：无人机摔到地上。
+
+  我们的 bug 是 ArithmException 类型，说明是软件 bug（代码崩溃）。
+
+1.3 理解 MAVLink 参数如何影响 ArduPilot
+
+  流程：
+    1. ADGFuzz 生成参数值（如 AFS_AMSL_LIMIT=0, TERRAIN_SPACING=0）
+    2. 通过 MAVLink 的 PARAM_SET 消息发送给 SITL
+    3. SITL 里的 ArduPilot 收到后调用参数更新函数
+    4. 参数更新触发控制算法重新计算
+    5. 在某些参数组合下，数学运算出错（如除零），程序崩溃
+
+  联系：harness 需要模拟这个过程——读取参数值，调用相关的
+  ArduPilot 函数，导致同样的崩溃。
+
+============================================================
+第二部分：定位 ArduPilot 源码中的漏洞代码
+============================================================
+
+2.1 方法 A：从 bug 文件的 init_path 推断
+
+  bug 文件的 init_path 格式为：
+    (源函数名, 输出变量名, [输入变量列表])
+
+  例如：
+    ('height_amsl_cm', 'terrain_difference', ['terrain_altitude'])
+
+  这说明：
+  - 函数名可能是 height_amsl_cm 或其附近
+  - 输出变量是 terrain_difference（地形高度差）
+  - 输入是 terrain_altitude（地形高度）
+
+  在 ArduPilot 源码中搜索：
+    cd ~/work/ArduPilot
+    grep -r "height_amsl_cm" libraries/ --include="*.cpp" --include="*.h"
+    grep -r "terrain_difference" libraries/ --include="*.cpp" --include="*.h"
+
+2.2 方法 B：用 GDB 抓 SITL crash 的调用栈（推荐）
+
+  步骤：
+    1. 确保 core dump 开启：
+       sudo bash -c "echo core > /proc/sys/kernel/core_pattern"
+       ulimit -c unlimited
+
+    2. 启动 SITL 不带 MAVProxy：
+       cd ~/work/ArduPilot
+       ./build/sitl/bin/arducopter -S --model + --speedup 1 \
+         --defaults Tools/autotest/default_params/copter.parm \
+         --sim-address=127.0.0.1 -I0
+
+    3. 在另一个终端用 MAVProxy 发送 crash 参数：
+       查看 bug 文件中的参数列表，用 mavproxy 命令逐条发送，
+       或者直接跑 ADGFuzz 让它发送。
+
+    4. SITL crash 后，用 GDB 分析 core dump：
+       gdb ./build/sitl/bin/arducopter core
+       (gdb) bt          # 查看调用栈
+       (gdb) info frame  # 查看崩溃位置
+       (gdb) list        # 查看崩溃处源码
+
+2.3 方法 C：从 RVpath 推断涉及的 ArduPilot 模块
+
+  RVpath 中包含参数名，每个参数属于一个模块：
+  - TERRAIN_*    → libraries/AP_Terrain/
+  - AFS_*        → libraries/AP_AdvancedFailsafe/
+  - EK2_*, EK3_* → libraries/AP_NavEKF2/, AP_NavEKF3/
+  - SIM_*        → SITL 参数，不涉及实际飞控代码
+  - OSD*         → libraries/AP_OSD/
+
+  从 bug 文件的参数名列表可以推断涉及哪些 libraries/ 子目录。
+  然后在这些目录下搜索 init_path 中提到的函数名。
+
+2.4 确定后记录信息
+
+  找到漏洞函数后，记录：
+  - 文件路径：如 libraries/AP_Terrain/TerrainHeight.cpp
+  - 函数名：如 TerrainHeight::calculate_height_amsl()
+  - 崩溃原因：如 除零、数组越界、浮点溢出（推测，等 GDB 确认）
+
+============================================================
+第三部分：提取漏洞函数到 harness
+============================================================
+
+3.1 打开 harness
+
+  编辑文件：
+    $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/
+      harness_full_bug1.c
+
+  当前结构：
+    ┌─ 第 1-140 行：自动生成的 ArduPilot 类型定义和辅助函数
+    │   ap_param_t, param_store[], get_param_value(), set_param_value(),
+    │   math helpers(radians, degrees, M_PI)
+    │
+    ├─ 第 141 行开始：int main() 函数
+    │   ├─ 从种子文件加载参数值到 param_store[]
+    │   ├─ fprintf(stderr, "Setting XXX = ...") 打印参数
+    │   ├─ /* === VULNERABLE CODE PATH === */  <-- 需要你修改的地方
+    │   ├─ // abort();  <-- 占位符，需要替换为真实的漏洞函数调用
+    │   └─ return 0;
+    └─ 最后一行 }
+
+3.2 添加 ArduPilot 的必要头文件
+
+  在 harness_full_bug1.c 的最顶部（HARNESS_HEADER 标记之后），
+  可能需要添加：
+    #include <math.h>
+    #include <string.h>
+    #include <stdlib.h>
+    #include <stdint.h>
+
+  如果漏洞函数用到了 ArduPilot 特定类型（如 Vector3f, Location 等），
+  需要从 ArduPilot 源码中复制相应的结构体定义。
+
+3.3 复制漏洞函数
+
+  步骤：
+    1. 从 ArduPilot 源码中找到漏洞函数
+       例如：libraries/AP_Terrain/TerrainHeight.cpp 的某个函数
+
+    2. 复制完整的函数体到 harness 中（替换 // abort()）
+
+    3. 如果函数调用了其他 ArduPilot 函数：
+       - 首先尝试添加 mock（空函数，返回固定值）
+       - 如果调用链太深，把直接导致 crash 的核心逻辑提取出来
+
+  示例（伪代码）：
+    // 原始 ArduPilot 代码（带硬件依赖）：
+    float AP_Terrain::height_amsl(const Location &loc) {
+        float terrain_alt = get_terrain_alt(loc);  // 需要 GPS/地形数据
+        barometer.read();                           // 需要硬件
+        return terrain_alt + barometer.get_alt();   // 核心计算
+    }
+
+    // 改为 harness 版本（mock 硬件依赖）：
+    float height_amsl(float lat, float lng) {
+        float terrain_alt = 500.0f;  // mock 地形高度
+        float baro_alt = 584.0f;     // mock 气压计高度
+        return terrain_alt + baro_alt;  // 核心计算逻辑保留
+    }
+
+3.4 处理依赖
+
+  常见需要 mock 的模块：
+  - HAL（硬件抽象层）：直接去掉，用固定值替代
+  - AP_Baro（气压计）：固定海拔
+  - AP_GPS：固定 GPS 位置
+  - AP_InertialSensor：固定 IMU 数据
+  - DataFlash（日志）：去掉所有日志语句
+  - AP_Math 中的向量/矩阵运算：保留，通常可以直接复制
+
+  技巧：
+  - 全局变量 → 在 harness 顶部声明为全局变量并初始化
+  - 类方法 → 改为普通函数（去掉类前缀，添加必要参数）
+  - 成员变量 → 改为函数参数或全局变量
+
+============================================================
+第四部分：编译并验证 harness 能复现 crash
+============================================================
+
+4.1 重新编译 harness
+
+  cd $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/build
+  ../Sleuth_code/Sleuth/afl-clang-fast -g -O0 \
+    -I ~/work/ArduPilot/libraries \
+    -o fuzz_bug1_cov \
+    ../harness_full_bug1.c -lm
+
+4.2 手动测试
+
+  cd ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1
+  ./fuzz_bug1_cov < in/seed_bug1.bin
+  echo "exit: $?"
+
+  如果返回值不是 0（或者程序 crash，显示 Segmentation fault/
+  Floating point exception），说明 harness 成功复现了 bug。
+
+4.3 如果没 crash
+
+  - 先用 GDB 单步调试：
+    gdb ./fuzz_bug1_cov
+    (gdb) run < in/seed_bug1.bin
+    (gdb) bt
+
+  - 检查种子文件中的参数值是否正确传递到了漏洞函数
+  - 在漏洞函数入口处加 fprintf(stderr, ...) 打印参数值
+  - 检查是否遗漏了初始化某个变量
+
+4.4 复制到 Sleuth 需要的目录
+
+  cp fuzz_bug1_cov ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1/
+
+============================================================
+第五部分：运行 DDG 分析 + Sleuth fuzzing
+============================================================
+
+5.1 生成 LLVM bitcode 用于 DDG 分析
+
+  如果漏洞代码的依赖都解决了（可以独立编译）：
+    cd $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/build
+    clang -g -O0 -emit-llvm -S -o harness_bug1.ll ../harness_full_bug1.c
+    llvm-as harness_bug1.ll -o harness_bug1.bc
+
+5.2 运行 DDG 静态分析
+
+    $SLEUTH_PATH/ddgAnalysis/build/tools/static-dua \
+      --ander harness_bug1.bc --out=target.json
+
+  生成的 target.json 包含内存依赖图，Sleuth 用它来引导变异。
+
+5.3 复制 target.json 到正确位置
+
+  cp target.json $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/
+
+5.4 运行 Sleuth fuzzing
+
+  # 确保种子和二进制都在正确位置
+  cp seed_bug1.bin ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1/in/
+  cp fuzz_bug1_cov ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1/
+
+  # 运行
+  cd $SLEUTH_PATH/src/exec
+  python autoRun.py ADGFUZZ-BUG-1 120m 1 SLEUTH
+
+5.5 分析结果
+
+  Sleuth 运行完成后：
+    cd $SLEUTH_PATH/src/exec/crash_analysis
+    ./crash_run.sh ADGFUZZ-BUG-1
+
+    cd ../generate_result
+    python impact_deal.py ADGFUZZ-BUG-1
+    python severity_score.py
+
+  输出文件在 $SLEUTH_PATH/Experiment/result/：
+  - New_Impact_Table-2.json  : 新发现的影响
+  - Severity_score_Table-4.json : 严重性评分
+
+============================================================
+第六部分：常见问题
+============================================================
+
+Q: 我找不到崩溃的具体函数怎么办？
+A: 最简单的办法是用 GDB。SITL crash 时会尝试运行
+   dumpstack.sh，虽然通常失败，但你可以：
+   1. sudo bash -c "echo core > /proc/sys/kernel/core_pattern"
+   2. ulimit -c unlimited
+   3. 重新触发 bug
+   4. gdb arducopter core
+   5. 输入 bt 看调用栈
+
+Q: 漏洞函数的依赖太多，提取不出来怎么办？
+A: 按优先级处理：
+   1. 先提取最核心的导致崩溃的几行代码
+   2. 其他依赖用 mock（固定返回值）
+   3. 如果实在无法提取，说明这个 bug 太深，换另一个 bug 试试
+
+Q: 生成的 target.json 是空的怎么办？
+A: LLVM bitcode 生成可能有问题。检查：
+   1. clang 版本是否匹配 LLVM 12
+   2. harness 代码是否包含了完整的函数定义
+   3. 是否有未解决的 #include
+
+Q: DDG 分析报错怎么办？
+A: static-dua 基于 SVF（指针分析），有严格的输入要求：
+   1. LLVM bitcode 必须是 clang 生成的（不能用 gcc）
+   2. LLVM 版本必须是 12（bitcode 格式随版本变化）
+   3. 代码不能有未定义的外部符号
+
+Q: 换了另一个无人机（比如 PX4），需要重新做什么？
+A: 几乎全部需要重做：
+   1. 重新找到 PX4 中对应的漏洞代码
+   2. PX4 用的类型/结构体和 ArduPilot 完全不同
+   3. 重新写 mock
+   4. 基本上等同于再做一遍"提取harness"的工作
+   这就是为什么项目计划中这步估了 4-8 小时。
+
+============================================================
+文件结尾
+============================================================

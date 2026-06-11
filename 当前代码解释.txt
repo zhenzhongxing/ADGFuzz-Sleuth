@@ -1,0 +1,964 @@
+============================================================
+  当前代码解释：ADGFuzz + Sleuth 适配项目完整说明
+============================================================
+
+本文档详细解释：
+  1. 两个原始项目（ADGFuzz、Sleuth）的工作原理
+  2. Bridge 桥接模块的设计思路
+  3. 所有修改过的文件及其改动原因
+  4. 数据如何在三个模块之间流动
+  5. 编译、运行、调试的完整流程
+
+阅读本文档前建议先看 README.md 和 PROJECT_PLAN.md 了解项目背景。
+
+============================================================
+目录
+============================================================
+
+第一部分：项目背景和原理解释
+  1.1 ADGFuzz 是什么、怎么工作
+  1.2 Sleuth 是什么、怎么工作
+  1.3 为什么需要"桥接"（Bridge）
+
+第二部分：整体架构和数据流
+  2.1 三个模块的关系
+  2.2 bug 数据的流转过程
+  2.3 关键概念对照表
+
+第三部分：ADGFuzz 的修改详解
+  3.1 adgfuzz.py — 主入口
+  3.2 fuzzer/fuzz.py — ArduPilot 模糊测试器
+  3.3 fuzzer/fuzzpx4.py — PX4 模糊测试器
+
+第四部分：Bridge 桥接模块详解
+  4.1 adg_to_sleuth.py — 格式转换主程序
+  4.2 adgfuzz_sleuth_export.py — 实时导出器
+  4.3 sleuth_impact_analysis.py — 影响分析器
+  4.4 sleuth_setup_bug.sh — 单 bug 环境搭建
+  4.5 setup_ubuntu.sh — 一键环境安装
+  4.6 run_pipeline.sh — 端到端自动化
+
+第五部分：Sleuth 的修改详解
+  5.1 include/afl-fuzz.h — 全局变量声明
+  5.2 src/afl-fuzz.c — 全局变量定义
+  5.3 src/exec/autoRun.py — 自动化 fuzzing 入口
+
+第六部分：编译问题的修复
+  6.1 Ubuntu 版本兼容性
+  6.2 Sleuth fuzzer 编译
+  6.3 DDGAnalysis 编译
+  6.4 Z3 编译
+
+第七部分：运行问题的修复
+  7.1 SITL 启动问题（gnome-terminal vs xterm vs headless）
+  7.2 MAVProxy PATH 问题
+  7.3 SITL 重启崩溃问题
+  7.4 超时控制问题
+  7.5 端口冲突问题
+
+第八部分：完整操作流程
+  8.1 新环境首次安装
+  8.2 运行 ADGFuzz 发现 bug
+  8.3 Bridge 转换
+  8.4 Sleuth 分析
+
+============================================================
+第一部分：项目背景和原理解释
+============================================================
+
+1.1 ADGFuzz 是什么、怎么工作
+------------------------------------------------------------
+
+ADGFuzz 是一个针对 Robotic Vehicle (RV) 控制软件的模糊测试框架。
+论文：NDSS 2026。
+
+核心流程：
+
+  (1) 静态分析阶段
+      ┌─────────────────────────────────────────────┐
+      │ 输入：ArduPilot 源码                          │
+      │ 工具：model/tree_parse.py                     │
+      │ 输出：ADG（赋值依赖图）json 文件                 │
+      │       static/initpath/ArduCopter/*.json        │
+      │                                              │
+      │ ADG 格式示例：                                 │
+      │ { "height_amsl_cm": {                        │
+      │     "terrain_difference":                    │
+      │       [["terrain_altitude"], 3]              │
+      │   }}                                         │
+      │ 含义：函数 height_amsl_cm 中，                  │
+      │       terrain_difference = f(terrain_altitude) │
+      │       依赖深度为 3                              │
+      └─────────────────────────────────────────────┘
+
+  (2) 映射阶段
+      ┌─────────────────────────────────────────────┐
+      │ 输入：ADG 图                                  │
+      │ 工具：model/Mapping.py                        │
+      │       + data/ 目录下的同义词表/物理耦合表        │
+      │       + map/ 目录下的映射规则                   │
+      │ 输出：MIS（最小输入子集）                        │
+      │                                              │
+      │ MIS 格式示例：                                 │
+      │ [('paramset', 'TERRAIN_SPACING', 2),         │
+      │  ('mavcmd', 'MAV_CMD_DO_CHANGE_ALTITUDE', 1)]│
+      │ 含义：要测试变量 height_amsl_cm，需要设置        │
+      │       TERRAIN_SPACING 参数（匹配度 2）和         │
+      │       MAV_CMD_DO_CHANGE_ALTITUDE 命令（匹配度 1）│
+      └─────────────────────────────────────────────┘
+
+  (3) 模糊测试阶段（核心）
+      ┌─────────────────────────────────────────────┐
+      │ 输入：MIS 列表                                │
+      │ 工具：fuzzer/fuzz.py（ADGfuzzer 类）           │
+      │       + fuzzer/oracle.py（bug 检测预言）       │
+      │       + fuzzer/runtimedict.py（参数值生成）     │
+      │       + fuzzer/rvmethod.py（MAVLink 通信）     │
+      │ 目标：SITL 模拟器（通过 MAVLink 协议交互）       │
+      │ 输出：bug 文件（bug1_ArithmException_xxx.txt）  │
+      │                                              │
+      │ Fuzzing 循环：                                │
+      │   1. 按熵值选择一条 MIS                        │
+      │   2. 生成参数值（随机，但受字典约束）             │
+      │   3. 通过 MAVLink 发送参数给 SITL               │
+      │   4. Oracle 检测 SITL 是否崩溃/偏离/坠地         │
+      │   5. 如果发现 bug → 保存输入                    │
+      │   6. 调整 MIS 的熵值                           │
+      │   7. 重启 SITL，继续下一轮                      │
+      └─────────────────────────────────────────────┘
+
+  MAVLink 通信机制：
+    ADGFuzz                     SITL
+       │                          │
+       │── UDP:14550 ──────────→  │  (发送参数/命令)
+       │←─ UDP:14550 ───────────  │  (接收心跳/遥测)
+       │── UDP:14551 ──────────→  │  (Oracle 独立监控)
+       │                          │
+       └── MAVProxy 转发 ─────────┘  (TCP:5760 ↔ UDP:14550/14551)
+
+  三个 Oracle（bug 检测器）：
+    - Software Crash：MAVLink 心跳丢失 → ArithmException
+    - Path Deviation：无人机偏离航点超过阈值 → WpDeviation
+    - Hit Ground：无人机高度低于地面 → StatusError
+
+1.2 Sleuth 是什么、怎么工作
+------------------------------------------------------------
+
+Sleuth 是基于 AFLplusplus 的 bug 影响探索工具。论文：ISSTA 2024。
+
+核心创新：在 AFL 的基础上增加了"内存依赖图引导变异"。
+
+  普通 AFL 的局限：
+    AFL 只追踪代码覆盖率。对于已知 bug，AFL 只知道"崩了"，
+    无法针对性地探索"这个 bug 还能导致什么其他后果"。
+
+  Sleuth 的改进：
+    1. 用 DDG（数据依赖图）静态分析目标程序
+    2. 识别哪些内存位置是"bug 相关的"
+    3. 优先变异这些位置的输入字节
+    4. 探索 bug 的深层影响（新的 crash 类型、更严重的后果）
+
+  Sleuth 的两个核心组件：
+
+  (a) DDGAnalysis（静态分析器）
+      ┌─────────────────────────────────────────────┐
+      │ 输入：目标程序的 LLVM bitcode                    │
+      │ 工具：ddgAnalysis/build/tools/static-dua      │
+      │       (基于 SVF + Z3 的指针分析和数据流分析)     │
+      │ 输出：target.json（内存依赖图）                  │
+      │                                              │
+      │ target.json 描述：                             │
+      │   - Capability（内存位置的能力集合）              │
+      │   - Position（内存位置的偏移集合）                │
+      │   - Switch（控制流分支点）                       │
+      │   - Union（相关联的内存位置组合）                 │
+      └─────────────────────────────────────────────┘
+
+  (b) Sleuth Fuzzer（修改版 AFL++）
+      ┌─────────────────────────────────────────────┐
+      │ 输入：target.json + PoC 种子文件 + 目标二进制    │
+      │ 工具：Sleuth_code/Sleuth/afl-fuzz             │
+      │       (基于 AFLplusplus v3.15a，增加 DDG 引导) │
+      │ 关键参数：                                     │
+      │   -C：启用 cmplog（比较日志，跟踪控制流）         │
+      │   -k：指定初始 PoC 文件路径                     │
+      │                                              │
+      │ 变异策略：                                     │
+      │   1. 探索阶段：用 coverage 引导发现新的 memory   │
+      │      position/capability/switch               │
+      │   2. 利用阶段：针对已知 bug 相关位置重点变异       │
+      │   3. 使用 target.json 中的 union 信息做关联变异   │
+      └─────────────────────────────────────────────┘
+
+1.3 为什么需要"桥接"（Bridge）
+------------------------------------------------------------
+
+  ADGFuzz 和 Sleuth 的交互模式完全不同：
+
+  ┌──────────────┬──────────────────┬──────────────────┐
+  │              │    ADGFuzz       │     Sleuth       │
+  ├──────────────┼──────────────────┼──────────────────┤
+  │ 目标程序     │ SITL 模拟器       │ 独立二进制文件    │
+  │ 输入方式     │ MAVLink 协议      │ 文件读取（stdin）  │
+  │ 输入格式     │ 参数 key-value 对  │ 字节流            │
+  │ 运行环境     │ SITL + MAVProxy   │ 无特殊依赖        │
+  │ 交互模式     │ 网络通信（UDP）    │ fork server       │
+  └──────────────┴──────────────────┴──────────────────┘
+
+  Bridge 负责：
+    1. 把 ADGFuzz 的 MAVLink 参数转换为二进制种子文件
+       (key-value → binary bytes)
+    2. 生成独立的 harness C 程序模板
+       (function stub + parameter loading code)
+    3. 在 Sleuth 的 VulnTable 中注册 bug
+       (让 autoRun.py 能找到这个 bug 的配置)
+    4. 运行 Sleuth 影响分析并汇总结果
+
+============================================================
+第二部分：整体架构和数据流
+============================================================
+
+2.1 三个模块的关系
+
+  ADGFuzz-main/            bridge/              Sleuth_code/
+  ┌─────────────┐     ┌──────────────┐     ┌────────────────┐
+  │ adgfuzz.py  │────→│adg_to_sleuth │────→│src/exec/       │
+  │ (发现 bug)   │     │.py (转换)     │     │autoRun.py       │
+  │             │     │              │     │(跑 Sleuth AFL)  │
+  │ fuzzer/     │     │adgfuzz_      │     │                │
+  │ fuzz.py     │     │sleuth_export │     │Sleuth/         │
+  │ (fuzzing)   │     │.py (实时导出) │     │afl-fuzz        │
+  │             │     │              │     │(DDG 引导变异)   │
+  │ outfile/    │     │sleuth_impact │     │                │
+  │ bug*.txt    │────→│_analysis.py  │────→│ddgAnalysis/    │
+  │ (bug 输出)   │     │(影响分析)     │     │static-dua      │
+  └─────────────┘     │              │     │(DDG 静态分析)   │
+                      │sleuth_setup_ │     │                │
+                      │bug.sh        │     │src/project/    │
+                      │(环境搭建)     │     │adgfuzz_bugs/   │
+                      │              │     │(bug 数据目录)   │
+                      │setup_ubuntu  │     │                │
+                      │.sh (系统安装) │     │src/vulnInfo/   │
+                      └──────────────┘     │VulnTable.txt   │
+                                           │(bug 注册表)     │
+                                           └────────────────┘
+
+2.2 bug 数据的流转过程
+
+  步骤 1: ADGFuzz 发现 bug
+  ┌─────────────────────────────────────────────────┐
+  │ adgfuzz.py 调用 ADGfuzzer.run()                   │
+  │ → fuzzing 循环中 Oracle 检测到异常                   │
+  │ → ADGfuzzer.save_bug() 保存 bug 文件               │
+  │                                                  │
+  │ bug 文件内容（文本格式）：                           │
+  │   init_path: (函数名, 变量名, [依赖列表])              │
+  │   RVpath: [[类型, 名称, 匹配度], ...]                │
+  │   paramset PARAM_NAME value                       │
+  │   mavcmd CMD_NAME [p1, p2, ..., p7]               │
+  │   ...                                             │
+  │                                                  │
+  │ 同时，如果启用 --sleuth_export：                     │
+  │   → SleuthExporter.export_bug()                   │
+  │   → 生成 seeds/bugN_Type.bin（二进制种子）            │
+  │   → 生成 metadata/bugN.json（元数据）                │
+  └─────────────────────────────────────────────────┘
+
+  步骤 2: Bridge 转换
+  ┌─────────────────────────────────────────────────┐
+  │ adg_to_sleuth.py:                                │
+  │   1. parse_bug_file() - 解析 ADGFuzz bug 文件      │
+  │   2. generate_harness() - 生成 harness C 代码       │
+  │      输入：bug 信息（模块名、参数列表）                │
+  │      输出：harneses/harness_bugN.c                 │
+  │   3. generate_seed() - 参数值编码为二进制            │
+  │      编码格式：                                     │
+  │        [类型标记 1B][名称长度 1B][名称 N B][值 4B]    │
+  │      输出：seeds/seed_bugN.bin                     │
+  │   4. VulnTable_generator() - 生成注册条目            │
+  │      输出：VulnTable_adgfuzz.txt                   │
+  └─────────────────────────────────────────────────┘
+
+  步骤 3: Sleuth 环境搭建
+  ┌─────────────────────────────────────────────────┐
+  │ sleuth_setup_bug.sh:                              │
+  │   1. 创建目录结构                                  │
+  │      $SLEUTH_PATH/src/project/adgfuzz_bugs/       │
+  │        ADGFUZZ-BUG-N/{poc,build,logs}/            │
+  │   2. 生成完整的 harness harness_full_bugN.c        │
+  │      = 类型定义头（AP 参数结构体等）                  │
+  │      + harness 模板（从 adg_to_sleuth 输出的）       │
+  │   3. 编译 LLVM bitcode（供 DDG 分析用）              │
+  │   4. 运行 DDGAnalysis 生成 target.json             │
+  │   5. 用 afl-clang-fast 编译插桩二进制               │
+  └─────────────────────────────────────────────────┘
+
+  步骤 4: Sleuth 模糊测试
+  ┌─────────────────────────────────────────────────┐
+  │ autoRun.py ADGFUZZ-BUG-1 600m 1 SLEUTH            │
+  │   → 读取 VulnTable.txt 获取配置                     │
+  │   → 构建 afl-fuzz 命令                             │
+  │   → 启动 fuzzing（AFL 交互式界面）                   │
+  │                                                  │
+  │ AFL 运行 10 分钟后：                                │
+  │   → crash_analysis/crash_run.sh 分析 crash         │
+  │   → generate_result/impact_deal.py 生成影响报告     │
+  │   → generate_result/severity_score.py 评估严重性    │
+  └─────────────────────────────────────────────────┘
+
+2.3 关键概念对照表
+
+  ┌───────────────────┬─────────────────────────────────┐
+  │ 概念               │ 含义                            │
+  ├───────────────────┼─────────────────────────────────┤
+  │ ADG (依赖图)        │ 从源码提取的变量赋值依赖关系       │
+  │ MIS (最小输入子集)   │ 影响某个变量的最小参数/命令集合    │
+  │ SITL                │ Software In The Loop 模拟器    │
+  │                     │ 在电脑上模拟 ArduPilot 飞控     │
+  │ MAVLink             │ 无人机通信协议                   │
+  │ MAVProxy            │ MAVLink 代理，转发 TCP↔UDP      │
+  │ Oracle              │ bug 检测器（崩溃/偏离/坠地）      │
+  │ Harness             │ 提取出来的独立测试程序            │
+  │ DDG (数据依赖图)     │ 内存级别的数据流关系图            │
+  │ PoC (概念验证)       │ 能触发 bug 的输入文件             │
+  │ VulnTable           │ 漏洞注册表，autoRun.py 从这里读取  │
+  │ target.json         │ DDGAnalysis 的输出，指导变异      │
+  └───────────────────┴─────────────────────────────────┘
+
+============================================================
+第三部分：ADGFuzz 的修改详解
+============================================================
+
+3.1 adgfuzz.py — 主入口
+------------------------------------------------------------
+
+  文件位置：ADGFuzz-main/adgfuzz.py
+  原始作者：ADGFuzz 论文作者
+  修改原因：
+    1. 增加 Sleuth 导出开关
+    2. 修复 SITL 启动在不同环境下的兼容性
+    3. 修复 MAVProxy 找不到的问题
+
+  修改 1：新增 --sleuth_export 参数
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：165-166（main 函数参数解析）                  │
+    │ 原始代码：无                                       │
+    │ 新增代码：                                        │
+    │   arg_parser.add_argument("--sleuth_export",     │
+    │       help="Enable Sleuth-compatible bug         │
+    │              export during fuzzing",             │
+    │       action='store_true', default=False)        │
+    │                                                  │
+    │ 作用：让用户可以选是否在 fuzzing 时自动导出         │
+    │       Sleuth 兼容的种子和元数据                     │
+    └─────────────────────────────────────────────────┘
+
+  修改 2：传递 sleuth_export 参数给 fuzzer 构造函数
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：288-299                                    │
+    │ 原始代码：                                        │
+    │   adgfuzz = ADGfuzzer(m.paths, rvtype,           │
+    │       bug_out_path=outpath, time_budget=runtime) │
+    │ 修改后：                                          │
+    │   adgfuzz = ADGfuzzer(m.paths, rvtype,           │
+    │       bug_out_path=outpath, time_budget=runtime,  │
+    │       sleuth_export=args.sleuth_export)          │
+    │                                                  │
+    │ 作用：把命令行参数传到 fuzzer 对象里                │
+    └─────────────────────────────────────────────────┘
+
+  修改 3：ardupilot_init() — SITL 启动
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：26-56                                      │
+    │ 原始代码：                                        │
+    │   c = 'gnome-terminal -- sim_vehicle.py -v '    │
+    │       + type + ' --console --map -w             │
+    │       --out=udp:127.0.0.1:14550                 │
+    │       --out=udp:127.0.0.1:14551'                │
+    │   sim = Popen(c, stdin=PIPE, ...)               │
+    │                                                  │
+    │ 问题：                                            │
+    │   1. gnome-terminal 在 Docker/无桌面不可用         │
+    │   2. -w 每次重编译（10 分钟）                      │
+    │   3. 没传 env（子进程找不到 ~/.local/bin/mavproxy） │
+    │   4. PIPE 缓冲区可能满导致子进程阻塞                │
+    │                                                  │
+    │ 修改后：                                          │
+    │   1. 自动检测终端：gnome-terminal > xterm > 直接跑  │
+    │   2. 去掉 -w（SITL 已编译好）                      │
+    │   3. env['PATH'] 加入 ~/.local/bin                │
+    │   4. 改用 DEVNULL 代替 PIPE                       │
+    │   5. 路径用 os.path.join 拼接（修 ArduPilotTools）│
+    └─────────────────────────────────────────────────┘
+
+  修改 4：terminate_ardupilot() — SITL 终止
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：58-66                                      │
+    │ 原始代码：                                        │
+    │   os.system("pkill -SIGINT -f 'sim_vehicle.py'")│
+    │                                                  │
+    │ 问题：只杀 sim_vehicle，不杀 arducopter 和         │
+    │       mavproxy，导致端口 5760 被旧进程占用          │
+    │                                                  │
+    │ 修改后：                                          │
+    │   os.system("pkill -9 -f 'sim_vehicle.py'")      │
+    │   os.system("pkill -9 -f 'arducopter'")          │
+    │   os.system("pkill -9 -f 'mavproxy.py'")         │
+    │                                                  │
+    │ 改用 -9 (SIGKILL) 强制杀，三个进程全杀             │
+    └─────────────────────────────────────────────────┘
+
+3.2 fuzzer/fuzz.py — ArduPilot 模糊测试器
+------------------------------------------------------------
+
+  文件位置：ADGFuzz-main/fuzzer/fuzz.py
+  原始作者：ADGFuzz 论文作者
+  修改原因：
+    1. 集成 SleuthExporter 在发现 bug 时自动导出
+    2. 修复 SITL 重启（close_and_relunch）的进程清理
+    3. 修复终端检测
+
+  修改 1：导入 SleuthExporter（行 21-31）
+    ┌─────────────────────────────────────────────────┐
+    │ 原始代码：无                                       │
+    │ 新增代码：                                        │
+    │   try:                                           │
+    │       from adgfuzz_sleuth_export import           │
+    │            SleuthExporter                        │
+    │       SLEUTH_EXPORT_AVAILABLE = True               │
+    │   except ImportError:                            │
+    │       SLEUTH_EXPORT_AVAILABLE = False              │
+    │                                                  │
+    │ 作用：优雅导入（bridge 模块可能不在 Python 路径中）   │
+    └─────────────────────────────────────────────────┘
+
+  修改 2：构造函数增加 sleuth_export 参数（行 36-93）
+    ┌─────────────────────────────────────────────────┐
+    │ 原始代码：                                        │
+    │   def __init__(self, paths, rvtype,              │
+    │       bug_out_path=..., time_budget=300):        │
+    │ 修改后：                                          │
+    │   def __init__(self, paths, rvtype,              │
+    │       bug_out_path=..., time_budget=300,          │
+    │       sleuth_export=False):                      │
+    │                                                  │
+    │ 如果 sleuth_export=True 且 SLEUTH_EXPORT_AVAILABLE:│
+    │   创建 SleuthExporter 实例                         │
+    │   self.sleuth_exporter = SleuthExporter(...)     │
+    └─────────────────────────────────────────────────┘
+
+  修改 3：save_bug() 增加 Sleuth 导出（行 574-587）
+    ┌─────────────────────────────────────────────────┐
+    │ 原始代码：只保存文本文件                            │
+    │ 修改后：在保存文本后，如果 sleuth_exporter 存在：     │
+    │   self.sleuth_exporter.export_bug(               │
+    │       bug_id, bug_type, init_path, rv_path,      │
+    │       temp_value, timestamp)                     │
+    │   生成二进制种子文件 + JSON 元数据                   │
+    └─────────────────────────────────────────────────┘
+
+  修改 4：close_and_relunch() — SITL 重启逻辑
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：466-534                                    │
+    │ 原始代码：                                        │
+    │   try:                                           │
+    │       os.system("pkill -SIGINT -f               │
+    │                  'sim_vehicle.py'")              │
+    │   ...                                            │
+    │   c = 'gnome-terminal -- sim_vehicle.py -w ...' │
+    │   sim = Popen(c, ...)                           │
+    │   time.sleep(60)                                 │
+    │   self.master = self.connect_init()              │
+    │                                                  │
+    │ 问题：                                            │
+    │   1. pkill -SIGINT 不够强，进程没被杀干净           │
+    │   2. 只杀 sim_vehicle，没杀 arducopter/mavproxy   │
+    │   3. 重启前没清理持久化文件（eeprom.bin）           │
+    │   4. 端口 5760 可能还被旧进程占用                   │
+    │   5. 没有等待端口释放就开始新的                      │
+    │   6. 使用和 ardupilot_init 不一致的终端启动方式      │
+    │                                                  │
+    │ 修改后：                                          │
+    │   1. 用 pkill -9 强杀三个进程                      │
+    │   2. 删 eeprom.bin（ArduPilot 目录 + 当前目录）     │
+    │   3. 删 terrain/ 缓存                             │
+    │   4. 清 IPC 共享内存                              │
+    │   5. 循环等待端口 5760 释放（最多 30 秒）            │
+    │   6. 使用和 ardupilot_init 一样的终端检测逻辑        │
+    └─────────────────────────────────────────────────┘
+
+  修改 5：reboot_nothread() — 无线程重启
+    ┌─────────────────────────────────────────────────┐
+    │ 行号：797-832                                    │
+    │ 和 close_and_relunch 的修改相同：                  │
+    │   强杀进程 + 清持久化 + 等端口 + 统一终端检测        │
+    │                                                  │
+    │ 这个函数用于 bug 最小化流程（minm_devi_inputs）      │
+    └─────────────────────────────────────────────────┘
+
+  ★ 核心概念：ADGfuzzer 的 fuzzing 循环
+    ┌─────────────────────────────────────────────────┐
+    │ run() 方法（行 201-460）                         │
+    │                                                  │
+    │ while cur_time < self.time_budget:               │
+    │   ┌─ 1. 按熵值概率选择一条 MIS                      │
+    │   ├─ 2. 启动 Oracle 线程                          │
+    │   ├─ 3. 内循环（run_time 次迭代）：                  │
+    │   │    随机选择类型（paramset/cmd/rc/mode）          │
+    │   │    → process_node() 发送 MAVLink 命令          │
+    │   │    → Oracle 线程检测 bug                       │
+    │   ├─ 4. 如果发现 bug：                            │
+    │   │    → save_bug() 保存 + Sleuth 导出            │
+    │   │    → adj_entropy() 降低该 MIS 的熵值           │
+    │   ├─ 5. 如果没发现 bug：                           │
+    │   │    → adj_entropy_notfound() 降低熵值           │
+    │   ├─ 6. close_and_relunch() 重启 SITL            │
+    │   └─ 7. 更新 cur_time，进入下一轮                   │
+    │                                                  │
+    │ 熵值机制：                                        │
+    │   高熵值 = 更有可能被选中 = 路径更"有趣"              │
+    │   每次测试后熵值降低（无论是否发现 bug）               │
+    │   发现 bug → 降得多                               │
+    │   没发现 → 降得少                                  │
+    │   熵值降到 0 → 从路径列表中删除                      │
+    └─────────────────────────────────────────────────┘
+
+3.3 fuzzer/fuzzpx4.py — PX4 模糊测试器
+------------------------------------------------------------
+
+  修改和 fuzz.py 类似：
+    1. 导入 SleuthExporter
+    2. 构造函数增加 sleuth_export 参数
+    3. save_bug() 中增加 Sleuth 导出调用
+
+  由于本项目目前只用 ArduCopter，PX4 部分未详细测试。
+
+============================================================
+第四部分：Bridge 桥接模块详解
+============================================================
+
+4.1 adg_to_sleuth.py — 格式转换主程序
+------------------------------------------------------------
+
+  位置：bridge/adg_to_sleuth.py
+
+  核心函数和类：
+
+  (a) parse_bug_file(filepath)
+      解析 ADGFuzz 输出的 bug 文本文件
+      输入：bug1_ArithmException_100.5.txt
+      输出：BugInfo 对象（包含 bug_id, bug_type, init_path, rv_path, temp_value）
+
+  (b) generate_harness(bug, output_dir)
+      生成独立的 C harness 程序模板
+      输出：harneses/harness_bug1.c
+
+      模板结构：
+        #include <stdio.h>
+        #include <string.h>
+        ...
+        #define MAX_PARAMS 510
+
+        // 从二进制种子加载参数
+        static void load_params(const uint8_t *data, size_t len) { ... }
+
+        int main(int argc, char **argv) {
+            // 读取输入文件
+            // 调用 load_params()
+            // 打印参数值
+            /* === VULNERABLE CODE PATH === */
+            // abort();  ← 需要替换为真实漏洞代码
+            return 0;
+        }
+
+  (c) generate_seed(bug, output_dir)
+      把参数值编码为二进制种子文件
+      编码格式：
+        [1B type][1B name_len][N B name][4B value(float32 LE)]
+        例如：paramset TERRAIN_SPACING=5 → hex: 01 0f 54 45 52 52 41 ...
+      输出：seeds/seed_bug1.bin
+
+  (d) VulnTable_generator(bug, project_path)
+      生成 Sleuth VulnTable.txt 条目
+      格式：/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1\t<project_path>\t<binary>\t<params>
+
+4.2 adgfuzz_sleuth_export.py — 实时导出器
+------------------------------------------------------------
+
+  位置：bridge/adgfuzz_sleuth_export.py
+
+  类：SleuthExporter
+    用法：
+      exporter = SleuthExporter(output_dir="./sleuth_export/")
+      exporter.export_bug(bug_id=1, bug_type="ArithmException", ...)
+
+    方法：
+      export_bug()         导出单个 bug
+      get_statistics()     统计已导出的 bug
+
+    文件输出：
+      outfile/quicktest/sleuth_export/
+      ├── seeds/
+      │   ├── bug1_ArithmException.bin
+      │   └── bug2_ArithmException.bin
+      └── metadata/
+          ├── bug1.json
+          └── bug2.json
+
+4.3 sleuth_impact_analysis.py — 影响分析器
+------------------------------------------------------------
+
+  位置：bridge/sleuth_impact_analysis.py
+
+  类：SleuthImpactAnalyzer
+    方法：
+      register_bug()          在 VulnTable 中注册 bug
+      run_crash_analysis()    运行 crash 分析脚本
+      generate_impact_report() 生成影响评估报告
+      batch_analyze()         批量分析多个 bug
+      compare_impacts()       对比 ADGFuzz vs Sleuth 的发现
+
+  ★ 注意：register_bug() 写入 VulnTable 时使用绝对路径。
+    autoRun.py 的路径解析已适配这一点（先检查路径是否存在，
+    不存在则拼接到 SLEUTH_PATH 下）。
+
+4.4 sleuth_setup_bug.sh — 单 bug 环境搭建
+------------------------------------------------------------
+
+  位置：bridge/sleuth_setup_bug.sh
+
+  功能：
+    1. 创建 Sleuth 项目目录结构
+    2. 分析 harness 确定涉及的 ArduPilot 模块
+    3. 生成完整的 harness（加上 AP 参数类型定义和辅助函数）
+    4. 编译 LLVM bitcode（供 DDG 分析）
+    5. 运行 DDGAnalysis 生成 target.json
+    6. 用 afl-clang-fast 编译插桩二进制
+    7. 设置初始种子
+    8. 更新 VulnTable
+
+  修改记录：
+    1. 修复：tail -n +13 "$HARNESS_FILE" | head -n -1
+       → tail -n +13 "$HARNESS_FILE"（不去掉结尾的 }）
+    2. 修复：clang → "$SLEUTH_PATH/Sleuth/afl-clang-fast"（正确的插桩编译）
+
+4.5 setup_ubuntu.sh — 一键环境安装
+------------------------------------------------------------
+
+  位置：bridge/setup_ubuntu.sh
+
+  功能：
+    1. 安装系统依赖
+    2. 安装 Python 依赖
+    3. 克隆并编译 ArduPilot SITL
+    4. 克隆并编译 PX4 SITL（可选）
+    5. 编译 Z3 + DDGAnalysis
+    6. 编译 Sleuth fuzzer
+    7. 设置环境变量
+
+  修改记录：
+    1. 移除 pkill（不是独立包，procps 自带）
+    2. make -j$(nproc) → make -j2（避免虚拟机内存耗尽）
+    3. z3 checkout 失败时自动删掉重 clone
+    4. LLVM/Clang 12 通过 apt.llvm.org 安装（适用于多 Ubuntu 版本）
+
+4.6 run_pipeline.sh — 端到端自动化
+------------------------------------------------------------
+
+  位置：bridge/run_pipeline.sh
+
+  功能：一键运行整个管道
+    bash run_pipeline.sh copter 3600
+    → ADGFuzz fuzzing → Bridge 转换 → Sleuth 分析 → 结果汇总
+
+  注意：需要 harness 已集成漏洞代码才能产出有意义的结果。
+
+============================================================
+第五部分：Sleuth 的修改详解
+============================================================
+
+5.1 include/afl-fuzz.h — 全局变量声明
+------------------------------------------------------------
+
+  位置：Sleuth_code/Sleuth/include/afl-fuzz.h
+  行号：165-189
+
+  原始代码（有问题）：
+    u8 *original_poc_buf;
+    u32 original_poc_len;
+    int *d_related_pos;
+    ...
+
+  问题：在头文件中直接定义全局变量（没有 extern），导致每个包含
+        此头文件的 .c 文件都生成一份定义，链接时报 "multiple definition"
+
+  修改后：
+    extern u8 *original_poc_buf;
+    extern u32 original_poc_len;
+    extern int *d_related_pos;
+    ...
+
+  原理：
+    extern 声明 = "这个变量存在，但定义在别处"
+    链接器只会在 afl-fuzz.c 中找到一份定义，不会冲突
+
+5.2 src/afl-fuzz.c — 全局变量定义
+------------------------------------------------------------
+
+  位置：Sleuth_code/Sleuth/src/afl-fuzz.c
+  行号：46-65（在 PROFILING ifdef 和 at_exit() 之间）
+
+  原始代码：没有这些定义（原本定义在头文件里）
+
+  新增代码：
+    u8 *original_poc_buf;
+    u32 original_poc_len;
+    int *d_related_pos;
+    int d_related_pos_num;
+    u32 fuzzed_pos[MAX_POSITION_NUM];
+    ...（共 18 个变量）
+
+  原理：这些是 Sleuth 在 AFL 基础上新增的全局变量，用于跟踪
+        memory position/capability/switch/union 等信息。
+        必须在一个 .c 文件中定义（只定义一次），在头文件中声明为 extern。
+
+5.3 src/exec/autoRun.py — 自动化 fuzzing 入口
+------------------------------------------------------------
+
+  位置：Sleuth_code/src/exec/autoRun.py
+
+  功能：
+    1. 读取 VulnTable.txt 获取 bug 配置
+    2. 扫描项目目录找到插桩二进制（*_cov）
+    3. 构建 afl-fuzz 命令
+    4. 并发运行多轮 fuzzing
+
+  修改记录：
+    1. 路径解析（行 48-54）
+       原始：PROJECT = _path + project_path
+       问题：如果 project_path 是绝对路径，路径被双重拼接
+       修改：_resolve() 函数 —— 先检查绝对路径是否存在，
+             不存在则拼接 SLEUTH_PATH
+
+    2. 去除 screen 包装（行 94）
+       原始：f"screen -S {VULN}-{i} -dm bash -c \"...\""
+       问题：screen 静默运行，看不到输出，排查问题困难
+       修改：直接运行命令，输出到终端
+
+    3. AFL 环境变量（行 94）
+       新增：AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+       作用：允许在未配置 core dump 的环境中运行 AFL
+
+    4. -k 参数指向文件而非目录（行 59-68）
+       原始：INITPOC = os.path.join(INFO, 'poc') → 可能指向目录
+       修改：如果 INITPOC 是目录，自动选取第一个文件
+
+    5. -C flag（已被来回修改多次）
+       当前：命令中用 -C（cmplog 模式），但要求种子能 crash。
+       如需在没有 crashing seed 的情况下运行，去掉 -C 即可。
+
+============================================================
+第六部分：编译问题的修复
+============================================================
+
+6.1 Ubuntu 版本兼容性
+------------------------------------------------------------
+
+  问题：Ubuntu 24.04 (Noble) 的官方源没有 LLVM 12
+  解决：在 setup_ubuntu.sh 中通过 apt.llvm.org 安装
+  最终：用户改用 Ubuntu 20.04 (Focal)，LLVM 12 可通过官方源安装
+
+6.2 Sleuth fuzzer 编译
+------------------------------------------------------------
+
+  链接器报错：multiple definition of all_switch_num, all_union, ...
+  原因：afl-fuzz.h 第 165-189 行直接定义了全局变量
+  修复：
+    afl-fuzz.h：所有变量加 extern
+    afl-fuzz.c：新增变量定义
+
+6.3 DDGAnalysis 编译
+------------------------------------------------------------
+
+  需要 LLVM 12（CMakeLists.txt: find_package(LLVM 12 REQUIRED)）
+  如果系统没有 LLVM 12，setup_ubuntu.sh 会尝试：
+    1. 通过 apt.llvm.org 安装 LLVM 12
+    2. 回退到系统 LLVM
+    3. patch CMakeLists.txt 接受其他版本
+
+6.4 Z3 编译
+------------------------------------------------------------
+
+  问题 1：内存不足（make -j$(nproc) 并行太多）
+  修复：改为 make -j2
+
+  问题 2：git checkout z3-4.8.8 失败（上次被中断，仓库不完整）
+  修复：checkout 失败时删掉重 clone
+
+  问题 3：编译时间长（卡在 51%）
+  原因：这是正常的，Z3 编译需要 10-20 分钟
+  提示：看到 warning 不要慌（-Wclass-memaccess），不影响编译
+
+============================================================
+第七部分：运行问题的修复
+============================================================
+
+7.1 SITL 启动问题
+------------------------------------------------------------
+
+  演变过程：
+
+  第 1 次尝试：原始 gnome-terminal
+    问题：Docker 里没有 gnome-terminal / 无 DISPLAY
+
+  第 2 次尝试：去掉 gnome-terminal，用 Popen + setpgrp
+    问题：MAVProxy console 需要终端 stdin，后台进程组收到 SIGTTIN
+
+  第 3 次尝试：改用 setsid
+    问题：Docker 终端里 setsid 会让终端冻结
+
+  第 4 次尝试：SITL --no-mavproxy + MAVProxy 单独启动
+    问题：MAVProxy 带 --console 会读 stdin，/dev/null 导致它退出
+
+  第 5 次尝试：MAVProxy 不带 --console
+    问题：MAVProxy 不带 --console 无法工作
+
+  第 6 次尝试：--no-mavproxy + SITL 用 setsid + MAVProxy 用 setsid
+    问题：终端冻结
+
+  最终方案：
+    xterm -e sim_vehicle.py（有桌面环境时）
+    或 Popen sim_vehicle.py 直接用 setsid（无桌面时）
+    核心改动：检测 DISPLAY 环境变量，三种策略：
+      1. DISPLAY 已设置 + gnome-terminal 可用 → 用 gnome-terminal
+      2. DISPLAY 已设置 + 只有 xterm → 用 xterm
+      3. 无 DISPLAY → 直接后台启动 sim_vehicle.py
+
+7.2 MAVProxy PATH 问题
+------------------------------------------------------------
+
+  问题：pip3 install --user MAVProxy 安装到 ~/.local/bin/
+        但这个路径不在默认 PATH 中
+  表现：sim_vehicle.py 调用 mavproxy.py 时报 "No such file or directory"
+  修复：
+    1. 在 ~/.bashrc 中添加：export PATH=$HOME/.local/bin:$PATH
+    2. 在 Python Popen 时传递 env 字典，包含修正后的 PATH
+
+7.3 SITL 重启崩溃问题
+------------------------------------------------------------
+
+  问题：ADGFuzz 通过 MAVLink 改的参数被 SITL 保存到 eeprom.bin。
+        重启 SITL 时加载了坏参数，立即浮点异常崩溃。
+  表现：ArduCopter 窗口反复显示 "Loaded defaults" + "Floating point exception"
+  修复：在 close_and_relunch() 和 reboot_nothread() 中：
+    1. 删除 ArduPilot 目录下的 eeprom.bin（工作目录 + ArduPilot 目录）
+    2. 删除 mav.parm（MAVProxy 参数缓存）
+    3. 删除 terrain/ 缓存
+    4. 清 IPC 共享内存（ipcrm -a）
+
+  注意：eeprom.bin 可能在两个位置：
+    - ~/work/ArduPilot/eeprom.bin（SITL 运行目录）
+    - ~/Desktop/ADGFuzz-Sleuth/ADGFuzz-main/eeprom.bin（fuzzer 目录）
+    两个都要删。
+
+7.4 超时控制问题
+------------------------------------------------------------
+
+  问题：--time 300 设为 5 分钟，但实际跑了 17+ 分钟
+  原因：超时只在每轮结束后检查，不在内循环中检查
+  修复：在内循环每次迭代前检查超时（但此修改后来在回退时丢失）
+  注意：当前版本的超时检查仍然只在轮次之间，对 quicktest (1 个路径)
+        影响不大。
+
+7.5 端口冲突问题
+------------------------------------------------------------
+
+  问题：SITL 绑定 TCP 5760，重启时旧进程没杀干净，新 SITL 无法绑定
+  修复：close_and_relunch 在启动新 SITL 前循环等待端口 5760 释放
+
+============================================================
+第八部分：完整操作流程
+============================================================
+
+8.1 新环境首次安装
+
+  # 1. 克隆项目
+  git clone https://github.com/zhenzhongxing/ADGFuzz-Sleuth.git
+  cd ADGFuzz-Sleuth
+
+  # 2. 安装 MAVProxy（中国大陆用清华镜像）
+  pip3 install --user -U MAVProxy -i https://pypi.tuna.tsinghua.edu.cn/simple
+  echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
+  source ~/.bashrc
+
+  # 3. 一键安装环境（需要 30-60 分钟）
+  bash bridge/setup_ubuntu.sh
+  source ~/.bashrc
+
+  # 4. 验证各组件
+  cd $ARDUPILOT_HOME && ./Tools/autotest/sim_vehicle.py -v ArduCopter --console --map
+  # 应看到三个窗口（SITL / MAVProxy Console / Map）
+
+  cd $ADGFUZZ_HOME && python adgfuzz.py --help
+  # 应看到 --sleuth_export 选项
+
+  $SLEUTH_PATH/Sleuth/afl-fuzz --help
+  # 应看到 AFL 帮助信息
+
+8.2 运行 ADGFuzz 发现 bug
+
+  cd $ADGFUZZ_HOME
+  python adgfuzz.py \
+      --initfile paths/testcopter/quicktest/ \
+      --rvtype copter \
+      --time 300 \
+      --out_path outfile/quicktest/ \
+      --sleuth_export
+
+  # 输出在 outfile/quicktest/：
+  #   bug1_ArithmException_<timestamp>.txt  (bug 详情)
+  #   sleuth_export/seeds/                   (Sleuth 种子)
+  #   sleuth_export/metadata/                (Sleuth 元数据)
+
+8.3 Bridge 转换
+
+  cd bridge
+
+  # 格式转换
+  python adg_to_sleuth.py \
+      --bug_dir ../ADGFuzz-main/outfile/quicktest/ \
+      --output_dir ./sleuth_input/
+
+  # 搭建 Sleuth 分析环境
+  bash sleuth_setup_bug.sh 1 ./sleuth_input/harnesses ~/work/ArduPilot
+
+  # ★ 手动步骤：编辑 harness，加入真实的漏洞代码
+  # 编辑 $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/
+  #       harness_full_bug1.c
+
+8.4 Sleuth 分析
+
+  # 重新编译 harness
+  cd $SLEUTH_PATH/src/project/adgfuzz_bugs/ADGFUZZ-BUG-1/build
+  $SLEUTH_PATH/Sleuth/afl-clang-fast -g -O0 \
+    -I ~/work/ArduPilot/libraries \
+    -o fuzz_bug1_cov ../harness_full_bug1.c -lm
+
+  # 复制到正确位置
+  cp fuzz_bug1_cov ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1/
+  cp seed_bug1.bin ~/Desktop/ADGFuzz-Sleuth/bridge/fuzz_ADGFUZZ-BUG-1/in/
+
+  # 运行 Sleuth
+  cd $SLEUTH_PATH/src/exec
+  python autoRun.py ADGFUZZ-BUG-1 120m 1 SLEUTH
+
+  # 分析结果
+  cd crash_analysis
+  ./crash_run.sh ADGFUZZ-BUG-1
+  cd ../generate_result
+  python impact_deal.py ADGFUZZ-BUG-1
+  python severity_score.py
+
+============================================================
+文件结尾
+============================================================
