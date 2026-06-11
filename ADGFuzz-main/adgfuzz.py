@@ -48,7 +48,8 @@ def ardupilot_init(arg):
 
     c = 'gnome-terminal -- ' + ARDUPILOT_HOME + 'Tools/autotest/sim_vehicle.py -v ' + type + ' --console --map --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551'
 
-    sim = Popen(c, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, shell=True, env=env)
+    gterm_log = open('/tmp/gnome_terminal_stderr.log', 'w')
+    sim = Popen(c, stdin=subprocess.DEVNULL, stderr=gterm_log, stdout=gterm_log, shell=True, env=env)
     print(f"Simulator started with gnome-terminal (PID: {sim.pid})")
     #sim = Popen(c, shell=True)
     #stdout, stderr = sim.communicate()  # Capture stdout and stderr
