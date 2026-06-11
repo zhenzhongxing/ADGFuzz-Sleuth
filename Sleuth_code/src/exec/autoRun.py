@@ -91,7 +91,7 @@ def main():
     EVOCATIO = os.path.join(_path, 'Evocatio/bug-severity-AFLplusplus/afl-fuzz')
 
     for i in range(1, ROUND + 1):
-        sleuth_cmd = f"screen -S {VULN}-{i} -dm bash -c \"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_SKIP_BIN_CHECK=1 timeout {TIME} {SLEUTH} -m none -C -i {INFILE} -o {OUTFILE}{i} -k {INITPOC} -- {EXE} {PARAM}\""
+        sleuth_cmd = f"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 timeout {TIME} {SLEUTH} -m none -C -i {INFILE} -o {OUTFILE}{i} -k {INITPOC} -- {EXE} {PARAM}"
         afl_cmd = f"screen -S comp_{VULN}-{i} -dm bash -c \"timeout {TIME} {AFLplusplus} -m none -C -i {COMPINFILE} -o {COMPOUTFILE}{i} -- {COMPEXE} {PARAM}\""
         evocatio_cmd = f"screen -S evo_{VULN}-{i} -dm bash -c \"timeout {TIME} {EVOCATIO} -m none -C -i {SEEDINFILE} -o {EVOOUTFILE}{i} -k {INFO}/evo_crash/poc_1 -- {EVOEXE} {PARAM}\""
 
