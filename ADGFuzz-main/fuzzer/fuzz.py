@@ -483,6 +483,10 @@ class ADGfuzzer:
         os.system("pkill -9 -f 'arducopter' 2>/dev/null")
         os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
         time.sleep(2)
+        # Clean up SITL persistent state (bad params from fuzzing cause instant crash on restart)
+        os.system("rm -f eeprom.bin mav.parm 2>/dev/null")
+        os.system("rm -f /tmp/ArduCopter* 2>/dev/null")
+        os.system("ipcrm -a 2>/dev/null")
         # Wait for port 5760 to be released
         for _ in range(30):
             if os.system('ss -tln | grep -q 5760') != 0:
@@ -800,6 +804,9 @@ class ADGfuzzer:
             os.system("pkill -9 -f 'arducopter' 2>/dev/null")
             os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
             time.sleep(2)
+            os.system("rm -f eeprom.bin mav.parm 2>/dev/null")
+            os.system("rm -f /tmp/ArduCopter* 2>/dev/null")
+            os.system("ipcrm -a 2>/dev/null")
             for _ in range(30):
                 if os.system('ss -tln | grep -q 5760') != 0:
                     break
