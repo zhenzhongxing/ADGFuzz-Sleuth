@@ -1,0 +1,445 @@
+============================================================
+ADGFuzz 修改文档
+============================================================
+
+本文档记录对 ADGFuzz 原始代码的所有修改，包括修改位置、
+修改内容、以及修改原因。
+
+修改涉及三个文件：
+  (1) ADGFuzz-main/adgfuzz.py          — 主入口
+  (2) ADGFuzz-main/fuzzer/fuzz.py      — ArduPilot 模糊测试器
+  (3) ADGFuzz-main/fuzzer/runtimedict.py — 参数值生成器
+
+============================================================
+1. adgfuzz.py — 主入口
+============================================================
+
+1.1 新增 --sleuth_export 命令行参数
+
+  位置：main() 函数，argparse 参数定义区域（第 165 行附近）
+  原始代码：无此参数
+  修改后：
+    arg_parser.add_argument("--sleuth_export",
+        help="Enable Sleuth-compatible bug export during fuzzing",
+        action='store_true', default=False)
+
+  解释：用户可通过 --sleuth_export 开关决定是否在 fuzzing 过程中
+        实时导出 Sleuth 兼容格式的种子和元数据。
+
+1.2 传递 sleuth_export 给 fuzzer 构造函数
+
+  位置：main() 函数，构造 ADGfuzzer/PX4fuzzer 处（第 288-299 行）
+  原始代码：
+    adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath,
+                         time_budget=runtime)
+  修改后：
+    adgfuzz = ADGfuzzer(m.paths, rvtype, bug_out_path=outpath,
+                         time_budget=runtime,
+                         sleuth_export=args.sleuth_export)
+
+  解释：把命令行参数传到 fuzzer 对象，让 save_bug() 能调用
+        SleuthExporter。
+
+1.3 修复 SITL 启动兼容性
+
+  位置：ardupilot_init() 函数（第 26-56 行）
+
+  原始代码：
+    c = 'gnome-terminal -- ' + ARDUPILOT_HOME +
+        'Tools/autotest/sim_vehicle.py -v ' + type +
+        ' --console --map -w ' +
+        '--out=udp:127.0.0.1:14550 ' +
+        '--out=udp:127.0.0.1:14551'
+
+    sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+    print(f"Simulator started with gnome-terminal (PID: {sim.pid})")
+
+  问题：
+    (a) gnome-terminal 依赖 D-Bus，在 Docker/headless 环境不可用
+    (b) -w 每次强制重编译（约 10 分钟），fuzzer 的 50 秒 sleep 不够
+    (c) 子进程 PATH 中缺少 ~/.local/bin，导致找不到 mavproxy.py
+    (d) 路径拼接缺了斜杠：ArduPilotTools → ArduPilot/Tools
+    (e) stdin/stderr/stdout 用 PIPE 可能导致缓冲区阻塞
+
+  修改后（最终版）：
+    # 1. 构建包含 ~/.local/bin 的环境变量
+    import subprocess
+    env = os.environ.copy()
+    local_bin = os.path.expanduser('~/.local/bin')
+    env['PATH'] = local_bin + os.pathsep + env.get('PATH', '')
+
+    # 2. 用 os.path.join 正确拼接路径
+    sim_script = os.path.join(ARDUPILOT_HOME,
+                              'Tools/autotest/sim_vehicle.py')
+
+    # 3. 去掉 -w（SITL 已编译好），去掉 --console --map 在 headless 下
+    sim_args = [sim_script, '-v', type,
+                '--out=udp:127.0.0.1:14550',
+                '--out=udp:127.0.0.1:14551']
+
+    # 4. 终端自动检测：gnome-terminal > xterm > 直接后台
+    term = None
+    if os.environ.get('DISPLAY'):
+        for t in ['gnome-terminal', 'xterm']:
+            if os.system(f'which {t} >/dev/null 2>&1') == 0:
+                term = t
+                break
+
+    if term == 'gnome-terminal':
+        sim = Popen([term, '--', 'python3'] + sim_args,
+                     stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+    elif term == 'xterm':
+        sim = Popen([term, '-e', 'python3'] + sim_args,
+                     stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+    else:
+        sim = Popen(['python3'] + sim_args,
+                     stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, env=env)
+
+    print(f"SITL started (PID: {sim.pid})")
+
+  解释：
+    - 有 DISPLAY 且 gnome-terminal 可用 → 用 gnome-terminal（GUI）
+    - 有 DISPLAY 但只有 xterm → 用 xterm
+    - 无 DISPLAY（Docker/SSH）→ 直接后台启动
+    - DEVNULL 替代 PIPE 避免缓冲区阻塞
+    - env 传递确保子进程能找到 mavproxy.py
+
+1.4 修复 terminate_ardupilot()
+
+  位置：terminate_ardupilot() 函数（第 58-66 行）
+  原始代码：
+    os.system("pkill -SIGINT -f 'sim_vehicle.py'")
+
+  修改后：
+    os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+    os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+    os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+
+  解释：
+    - 原始只用 SIGINT 信号不够强，进程可能不响应
+    - 原始只杀 sim_vehicle.py，arducopter 和 mavproxy.py 会残留
+    - 改为 pkill -9 (SIGKILL) 杀全部三个，确保端口 5760 彻底释放
+
+============================================================
+2. fuzzer/fuzz.py — ArduPilot 模糊测试器
+============================================================
+
+2.1 导入 SleuthExporter（优雅降级）
+
+  位置：文件顶部 import 区域（第 21-31 行）
+  原始代码：无
+  修改后：
+    try:
+        import sys as _sys
+        _bridge_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            '..', 'bridge')
+        if os.path.isdir(_bridge_path):
+            _sys.path.insert(0, _bridge_path)
+        from adgfuzz_sleuth_export import SleuthExporter
+        SLEUTH_EXPORT_AVAILABLE = True
+    except ImportError:
+        SLEUTH_EXPORT_AVAILABLE = False
+
+  解释：尝试从 bridge/ 目录导入 SleuthExporter。如果 bridge 模块
+        不存在，不报错，只是禁用 Sleuth 导出功能。这样 ADGFuzz
+        可以在没有 bridge 的环境中独立运行。
+
+2.2 构造函数增加 sleuth_export 参数
+
+  位置：ADGfuzzer.__init__() 方法签名和初始化部分
+        （第 36-37 行签名，第 88-93 行初始化）
+  原始代码：
+    def __init__(self, paths, rvtype, bug_out_path=...,
+                 time_budget=300):
+  修改后：
+    def __init__(self, paths, rvtype, bug_out_path=...,
+                 time_budget=300, sleuth_export=False):
+
+  新增初始化代码：
+    self.sleuth_export = sleuth_export
+    self.sleuth_exporter = None
+    if sleuth_export and SLEUTH_EXPORT_AVAILABLE:
+        sleuth_dir = os.path.join(bug_out_path, "sleuth_export")
+        self.sleuth_exporter = SleuthExporter(output_dir=sleuth_dir)
+
+  解释：如果启用了 sleuth_export 且模块可用，创建 SleuthExporter
+        实例，后续每次发现 bug 时自动导出。
+
+2.3 save_bug() 中增加 Sleuth 导出
+
+  位置：save_bug() 方法末尾（第 574-587 行）
+  原始代码：只保存文本文件
+  修改后：
+    # Sleuth export: synchronize bug to sleuth-compatible format
+    if self.sleuth_exporter is not None:
+        try:
+            seed_path = self.sleuth_exporter.export_bug(
+                bug_id=self.bug_count,
+                bug_type=bugtype,
+                init_path=str(i_path),
+                rv_path=path,
+                temp_value=self.temp_value,
+                timestamp=time_stamp,
+            )
+            print(f"[Sleuth] Exported bug #{self.bug_count} → {seed_path}")
+        except Exception as e:
+            print(f"[Sleuth] Export failed for bug #{self.bug_count}: {e}")
+
+  解释：在保存文本 bug 文件的同时，调用 SleuthExporter 生成
+        二进制种子文件 + JSON 元数据。
+
+2.4 修复 close_and_relunch() — SITL 重启逻辑
+
+  位置：close_and_relunch() 方法（第 466-534 行）
+
+  修改内容：
+
+  (a) 进程清理：改为 pkill -9 强杀全部三个进程
+      原始代码：
+        os.system("pkill -SIGINT -f 'sim_vehicle.py'")
+      修改后：
+        os.system("pkill -9 -f 'sim_vehicle.py' 2>/dev/null")
+        os.system("pkill -9 -f 'arducopter' 2>/dev/null")
+        os.system("pkill -9 -f 'mavproxy.py' 2>/dev/null")
+
+  (b) SITL 持久化状态清理（新增）
+      原始代码：无
+      修改后：
+        ARDUPILOT_HOME = os.path.expanduser(os.getenv(...))
+        os.system(f"rm -f {ARDUPILOT_HOME}/eeprom.bin ...")
+        os.system("rm -f mav.parm eeprom.bin 2>/dev/null")
+        os.system("rm -rf terrain 2>/dev/null")
+        os.system("ipcrm -a 2>/dev/null")
+
+      解释：ADGFuzz 通过 MAVLink 改的参数被 SITL 保存到
+            eeprom.bin。重启 SITL 时如果加载了坏参数，会立即
+            浮点异常崩溃（"Floating point exception"）。
+            删除 eeprom.bin（ArduPilot 目录 + 当前目录）、
+            mav.parm（MAVProxy 参数缓存）、terrain/ 缓存、
+            IPC 共享内存，确保新 SITL 从干净状态启动。
+
+  (c) 端口释放等待（新增）
+      原始代码：无
+      修改后：
+        for _ in range(30):
+            if os.system('ss -tln | grep -q 5760') != 0:
+                break
+            time.sleep(1)
+
+      解释：等待 TCP 5760 端口释放后再启动新 SITL，避免
+            "bind failed - Address already in use" 错误。
+
+  (d) SITL 启动方式统一
+      原始代码：
+        c = 'gnome-terminal -- sim_vehicle.py -v ... -w ...'
+        sim = Popen(c, stdin=PIPE, stderr=PIPE, stdout=PIPE, shell=True)
+      修改后：使用和 adgfuzz.py 相同的终端检测逻辑
+        （gnome-terminal > xterm > 直接后台）
+
+2.5 修复 reboot_nothread()
+
+  位置：minm_devi_inputs() 内的 reboot_nothread() 闭包
+        （第 797-832 行）
+
+  修改内容：和 close_and_relunch() 相同的改动——
+    强杀进程 + 清理持久化状态 + 端口等待 + 终端检测。
+
+  解释：reboot_nothread() 用于 bug 最小化流程
+        （minm_devi_inputs），也需要可靠重启 SITL。
+
+============================================================
+3. fuzzer/runtimedict.py — 参数值生成器
+============================================================
+
+  修改目标：让 ADGFuzz 生成越界参数值，触发 SIGSEGV 类内存 bug。
+
+3.1 RuntimeDictionary 新增内存 fuzz 模式
+
+  位置：RuntimeDictionary 类内部（get_parameter_value 方法前）
+
+  原始代码：无
+  修改后添加以下内容：
+
+  (a) 内存危险参数模式列表
+    MEMORY_DANGER_PATTERNS = [
+        '_ID', '_INDEX', '_CHANNEL', '_FUNCTION', '_SRC', '_RECV_ID',
+        '_MASK', '_IMU', '_GYR_ID', '_ACC_ID', '_TYPE', '_ORIENT',
+        '_CUST_ROT', '_H_SW', '_GPIO', '_ALT_SOURCE', '_ENABLE_MASK',
+        '_FS_MSK', '_3DMASK', '_BDMASK', '_RVMASK', '_FTW_MASK',
+        '_VOLZ_MASK', '_IMU_MASK', '_GSF_RUN', '_GSF_USE',
+        '_PRX', '_RNGFND', '_RPM', '_SERVO_BLH', '_STOP_PIN',
+    ]
+
+    解释：这些参数名模式对应可能影响数组索引、指针选择、
+          内存操作的参数。例如 INS_GYR_ID 决定使用哪个
+          陀螺仪（在 sensor 数组中索引），越界则 SIGSEGV。
+
+  (b) 飞行安全参数（不越界）
+    MEMORY_SAFE_PATTERNS = [
+        'ARMING_', 'DISARM_', 'FS_GCS_', 'FS_THR_', 'FRAME_CLASS',
+        'SYSID_', 'BRD_SAFETY', 'MOT_PWM_TYPE', 'SCHED_LOOP_RATE',
+    ]
+
+    解释：这些参数影响 SITL 能否正常起飞。如果越界，SITL
+          连 arm 都做不到，后面的 fuzzing 全部浪费。
+
+  (c) 越界概率
+    MEMORY_FUZZ_PROBABILITY = 0.55  # 55%
+
+  (d) 模式匹配函数
+    @staticmethod
+    def _is_memory_danger(param_name: str) -> bool:
+        for pat in RuntimeDictionary.MEMORY_DANGER_PATTERNS:
+            if pat in param_name:
+                for safe in RuntimeDictionary.MEMORY_SAFE_PATTERNS:
+                    if safe in param_name:
+                        return False
+                return True
+        return False
+
+  (e) 越界值生成函数
+    @staticmethod
+    def _gen_oob_value(param_info: dict) -> float:
+        strategy = random.randint(0, 5)
+        if strategy == 0:
+            return float(random.choice(
+                [rmax * 10, rmax * 100, 65535, 255, 32767]))
+        elif strategy == 1:
+            return float(random.choice(
+                [-1, -2, -128, -32768, -rmin - 1]))
+        elif strategy == 2:
+            return 0.0
+        elif strategy == 3:
+            return float(rmax + 1)
+        elif strategy == 4:
+            return float(random.randint(0, 65535))
+        else:
+            return float(-random.randint(1, 32768))
+
+    六种策略：
+      (0) 远超最大值（模拟 buffer overflow）→ rmax*100, 65535
+      (1) 负数（模拟索引/指针越界）→ -1, -128, -32768
+      (2) 零值（模拟空指针/除零）→ 0
+      (3) 刚好越界（off-by-one）→ rmax + 1
+      (4,5) 随机大值/负值
+
+3.2 修改 get_parameter_value()
+
+  位置：get_parameter_value() 方法（第 308-319 行）
+
+  原始代码：
+    def get_parameter_value(self, parameter_name):
+        param_info = self.get_parameter(parameter_name)
+        if param_info is None:
+            return self.get_a_random(self.rangemin, self.rangemax)
+        rt_value = self.get_random_value(param_info)
+        return rt_value
+
+  修改后：
+    def get_parameter_value(self, parameter_name):
+        param_info = self.get_parameter(parameter_name)
+
+        # Memory-fuzz mode: for danger params, go out-of-bounds
+        if param_info is not None and self._is_memory_danger(parameter_name):
+            if random.random() < self.MEMORY_FUZZ_PROBABILITY:
+                return self._gen_oob_value(param_info)
+
+        # Normal path
+        if param_info is None:
+            return self.get_a_random(self.rangemin, self.rangemax)
+        return self.get_random_value(param_info)
+
+  解释：如果参数名匹配危险模式且有 CSV 定义，55% 概率返回
+        越界值；否则走原逻辑（合法范围随机）。
+
+        如果参数不在 CSV 中（param_info is None），走原逻辑
+       （默认 0-10000 随机），因为危险参数肯定有 CSV 定义。
+
+3.3 修改 _random_choice() — 20% 越界
+
+  位置：_random_choice() 方法（第 278-292 行）
+
+  原始代码：
+    def _random_choice(self, range_min, range_max, increment):
+        choice = random.choices(
+            population=[range_min, range_max, 'between'],
+            weights=[0.2, 0.2, 0.6],
+            k=1)[0]
+        if choice == 'between':
+            steps = int((range_max - range_min) // increment)
+            random_step = random.randint(0, steps)
+            return range_min + random_step * increment
+        return choice
+
+  修改后：方法开头插入
+    if random.random() < 0.20:
+        return float(random.choice(
+            [-1, 0, 255, 65535, -32768,
+             max(1, int(range_max)) * random.randint(2, 100)]))
+
+  解释：即使参数不匹配危险模式，也有 20% 概率返回越界值。
+        覆盖了 CSV 中未被 MEMORY_DANGER_PATTERNS 覆盖但实际
+        可能有内存影响的参数。
+
+3.4 修改 _random_choice_n() — 20% 越界
+
+  位置：_random_choice_n() 方法（第 294-306 行）
+  同上，方法开头插入相同的 20% 越界检测。
+
+3.5 修改 MavcmdDictionary.return_a_value()
+
+  位置：MavcmdDictionary.return_a_value() 方法（第 49-92 行）
+
+  原始代码第一行就是参数类型判断
+  修改后：方法开头插入
+    if random.random() < 0.25:
+        return random.choice(
+            [-1, 0, 255, 65535, -32768,
+             random.randint(0, 65535),
+             -random.randint(1, 32768)])
+
+  解释：MAV_CMD 命令的参数（param1-param7）也有 25% 概率
+        被替换为越界值。这会触发命令处理逻辑中的潜在的
+        内存错误。
+
+============================================================
+4. 修改效果
+============================================================
+
+  修改前：
+    ADGFuzz 所有参数值都在 CSV 定义的 [Range_Min, Range_Max] 内。
+    例如 INS_GYR_ID 范围 [0, 4]，返回值永远在 0-4。
+    只能发现 SIGFPE（除零）、StatusError（软件检测坠地）、
+    WpDeviation（路径偏离）。
+
+  修改后：
+    - 内存危险参数（_ID/_INDEX/_CHANNEL 等）55% 概率越界
+    - MAV_CMD 参数 25% 概率越界
+    - 所有普通参数 20% 概率越界
+    - 越界策略涵盖：极大值、负数、0、off-by-one、随机大值
+
+    预期能触达：
+    - SIGSEGV（数组越界、空指针解引用）
+    - SIGABRT（assert 失败、stack smashing）
+    - 其他内存安全 bug
+
+  实测验证（10 次采样）：
+    INS_GYR_ID  正常范围 [0,4]  → 输出 65535, -128, 32767, 0, 19147...
+    RNGFND1_RECV_ID 正常范围 [0,9] → 输出 65536, -30421, 62213, -4969...
+
+============================================================
+5. 回退方法
+============================================================
+
+  如需恢复原始行为：
+    git checkout f4024f1 -- ADGFuzz-main/adgfuzz.py
+    git checkout f4024f1 -- ADGFuzz-main/fuzzer/fuzz.py
+    git checkout f4024f1 -- ADGFuzz-main/fuzzer/runtimedict.py
+
+  f4024f1 为本次项目开始前的原始 ADGFuzz 代码快照。
+
+============================================================
