@@ -47,6 +47,12 @@ class MavcmdDictionary:
         param = self.cmd_set.get(cmd_name)
         return param['Index']
     def return_a_value(self, param):
+        # Memory-fuzz: 25% chance to return extreme values for any command param
+        if random.random() < 0.25:
+            return random.choice([-1, 0, 255, 65535, -32768,
+                                  random.randint(0, 65535),
+                                  -random.randint(1, 32768)])
+
         if param == 'E':
             return 0
         elif param == 'N':
@@ -60,11 +66,8 @@ class MavcmdDictionary:
                     return max_val
             else:
                 max_val = random.randint(min_val, min_val + 1000)
-            #max_val = int(param_list[1]) if param_list[1] != 'N' else random.randint(min_val, min_val + 1000)
             step = int(param_list[2]) if param_list[2] != 'N' else 1
-
             return random.choice(range(min_val, max_val + 1, step))
-        # case by case...
         elif param == 'm':
             return random.randint(0, 1000)
         elif param == 'deg':
@@ -72,22 +75,13 @@ class MavcmdDictionary:
         elif param == 'm/s':
             return random.randint(0, 50)
         elif param == 'rad':
-            #return random.uniform(-3.14, 6.28)
             return random.randint(-314, 628)/100.0
         elif param == 's':
             return random.randint(0, 100)
-        # elif param == 'us':
-        #     return random.randint(0, 100)
-        # elif param == 'ds':
-        #     return random.randint(0, 100)
-        # elif param == 'ms':
-        #     return random.randint(0, 100)
         elif param == 'degE7':
             return random.randint(-1800000000, 1800000000)
         elif param == 'deg/s':
             return random.randint(0, 360)
-        # elif param == 'Hz':
-        #     return random.randint(0, 1000)
         else:
             return 1
 
@@ -276,47 +270,110 @@ class RuntimeDictionary:
             return self._random_choice(range_min, range_max, increment)
 
     def _random_choice(self, range_min, range_max, increment):
+        # Memory-fuzz: 20% chance to ignore range bounds entirely
+        if random.random() < 0.20:
+            return float(random.choice([-1, 0, 255, 65535, -32768,
+                         max(1, int(range_max)) * random.randint(2, 100)]))
+
         choice = random.choices(
             population=[range_min, range_max, 'between'],
-            weights=[0.2, 0.2, 0.6], #: Choose an optimal probability
+            weights=[0.2, 0.2, 0.6],
             k=1
         )[0]
 
         if choice == 'between':
-            #step = (range_max - range_min) / increment
             steps = int((range_max - range_min) // increment)
-            #print("steps: ", steps)
             random_step = random.randint(0, steps)
             return range_min + random_step * increment
 
         return choice
 
     def _random_choice_n(self, range_min, range_max):
-        # no increment
+        # Memory-fuzz: 20% chance to ignore range bounds entirely
+        if random.random() < 0.20:
+            return float(random.choice([-1, 0, 255, 65535, -32768,
+                         max(1, int(range_max)) * random.randint(2, 100)]))
+
         choice = random.choices(
             population=[range_min, range_max, 'between'],
-            weights=[0.1, 0.1, 0.8], #: Choose an optimal probability
+            weights=[0.1, 0.1, 0.8],
             k=1
         )[0]
 
         if choice == 'between':
-            #random_step = random.randint(range_min, range_max)
-            random_step = self.get_a_random(range_min, range_max) # : this or upper?
+            random_step = self.get_a_random(range_min, range_max)
             return random_step
         return choice
 
-    def get_parameter_value(self, parameter_name):
-        # row = self.parameters[self.parameters['Parameter_Name'] == parameter_name]
-        # if row.empty:
-        #     raise ValueError(f"Parameter {parameter_name} not found")
-        # return self.get_random_value(row.iloc[0])
+    # ---- Memory-fuzzing: params likely to trigger SIGSEGV when out-of-bounds ----
+    MEMORY_DANGER_PATTERNS = [
+        '_ID', '_INDEX', '_CHANNEL', '_FUNCTION', '_SRC', '_RECV_ID',
+        '_MASK', '_IMU', '_GYR_ID', '_ACC_ID', '_TYPE', '_ORIENT',
+        '_CUST_ROT', '_H_SW', '_GPIO', '_ALT_SOURCE', '_ENABLE_MASK',
+        '_FS_MSK', '_3DMASK', '_BDMASK', '_RVMASK', '_FTW_MASK',
+        '_VOLZ_MASK', '_IMU_MASK', '_GSF_RUN', '_GSF_USE',
+        '_PRX', '_RNGFND', '_RPM', '_SERVO_BLH', '_STOP_PIN',
+    ]
+    # Flight-critical params: must stay in valid range for SITL to arm/fly
+    MEMORY_SAFE_PATTERNS = [
+        'ARMING_', 'DISARM_', 'FS_GCS_', 'FS_THR_', 'FRAME_CLASS',
+        'SYSID_', 'BRD_SAFETY', 'MOT_PWM_TYPE', 'SCHED_LOOP_RATE',
+    ]
+    MEMORY_FUZZ_PROBABILITY = 0.55  # 55% chance to go out-of-bounds
 
+    @staticmethod
+    def _is_memory_danger(param_name: str) -> bool:
+        for pat in RuntimeDictionary.MEMORY_DANGER_PATTERNS:
+            if pat in param_name:
+                for safe in RuntimeDictionary.MEMORY_SAFE_PATTERNS:
+                    if safe in param_name:
+                        return False
+                return True
+        return False
+
+    @staticmethod
+    def _gen_oob_value(param_info: dict) -> float:
+        """Generate an out-of-bounds value designed to trigger SIGSEGV"""
+        range_min = param_info.get('Range_Min', '0')
+        range_max = param_info.get('Range_Max', '1000')
+        try:
+            rmin = int(float(str(range_min))) if str(range_min) != 'N' else 0
+            rmax = int(float(str(range_max))) if str(range_max) != 'N' else 1000
+        except (ValueError, TypeError):
+            rmin, rmax = 0, 1000
+
+        strategy = random.randint(0, 5)
+        if strategy == 0:
+            # Way over max (simulates buffer overflow / array OOB)
+            return float(random.choice([rmax * 10, rmax * 100, 65535, 255, 32767]))
+        elif strategy == 1:
+            # Negative (simulates signed/unsigned confusion or negative index)
+            return float(random.choice([-1, -2, -128, -32768, -rmin - 1]))
+        elif strategy == 2:
+            # Zero (simulates null pointer / division by zero)
+            return 0.0
+        elif strategy == 3:
+            # Exactly one past max (off-by-one)
+            return float(rmax + 1)
+        elif strategy == 4:
+            # Arbitrary large random
+            return float(random.randint(0, 65535))
+        else:
+            # Negative large
+            return float(-random.randint(1, 32768))
+
+    def get_parameter_value(self, parameter_name):
         param_info = self.get_parameter(parameter_name)
-        if param_info is None: # if not found
-            #return random.randint(self.rangemin, self.rangemax)
+
+        # Memory-fuzz mode: for danger params, go out-of-bounds
+        if param_info is not None and self._is_memory_danger(parameter_name):
+            if random.random() < self.MEMORY_FUZZ_PROBABILITY:
+                return self._gen_oob_value(param_info)
+
+        # Normal path
+        if param_info is None:
             return self.get_a_random(self.rangemin, self.rangemax)
-        rt_value = self.get_random_value(param_info)
-        return rt_value
+        return self.get_random_value(param_info)
 
 class xyzData:
     def __init__(self):
