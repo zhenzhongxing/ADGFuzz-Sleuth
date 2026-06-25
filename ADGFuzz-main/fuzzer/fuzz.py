@@ -519,7 +519,7 @@ class ADGfuzzer:
         sim_args = [sim_script, '-v', type, '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
         term = None
         if os.environ.get('DISPLAY'):
-            for t in ['gnome-terminal', 'xterm']:
+            for t in ['xterm', 'gnome-terminal']:
                 if os.system(f'which {t} >/dev/null 2>&1') == 0:
                     term = t; break
         if term == 'gnome-terminal':
@@ -847,7 +847,7 @@ class ADGfuzzer:
             sim_args = [sim_script, '-v', type, '--out=udp:127.0.0.1:14550', '--out=udp:127.0.0.1:14551']
             term = None
             if os.environ.get('DISPLAY'):
-                for t in ['gnome-terminal', 'xterm']:
+                for t in ['xterm', 'gnome-terminal']:
                     if os.system(f'which {t} >/dev/null 2>&1') == 0:
                         term = t; break
             if term == 'gnome-terminal':

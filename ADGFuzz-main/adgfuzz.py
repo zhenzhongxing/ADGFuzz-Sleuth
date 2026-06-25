@@ -52,7 +52,7 @@ def ardupilot_init(arg):
     # Detect terminal: gnome-terminal (GUI) > direct run (headless)
     term = None
     if os.environ.get('DISPLAY'):
-        for t in ['gnome-terminal', 'xterm']:
+        for t in ['xterm', 'gnome-terminal']:
             if os.system(f'which {t} >/dev/null 2>&1') == 0:
                 term = t
                 break
